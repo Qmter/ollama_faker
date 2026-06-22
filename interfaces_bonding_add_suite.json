@@ -1,0 +1,68 @@
+[
+    {
+        "PRESET": {},
+        "1": {
+            "description": "Test the configuration and functionality of bond7 interface.",
+            "1.1": {
+                "type": "POST",
+                "endpoint": "/interfaces/bonding/capability",
+                "schema": {
+                    "ifname": "bond7"
+                },
+                "errCode": 0,
+                "httpCode": 200
+            }
+        },
+        "AFTER-TEST": {}
+    },
+    {
+        "PRESET": {},
+        "1": {
+            "description": "Test VRF configuration on bond interface.",
+            "1.1": {
+                "type": "POST",
+                "endpoint": "/interfaces/bonding/capability",
+                "schema": {
+                    "ifname": "bond1",
+                    "vrf_name": "f_AKAK_jSeuV"
+                },
+                "errCode": 0,
+                "httpCode": 200
+            }
+        },
+        "AFTER-TEST": {}
+    },
+    {
+        "PRESET": {},
+        "1": {
+            "description": "Test the configuration and functionality of network bond interface 'bond5'.",
+            "1.1": {
+                "type": "POST",
+                "endpoint": "/interfaces/bonding/capability",
+                "schema": {
+                    "ifname": "bond5"
+                },
+                "errCode": 0,
+                "httpCode": 200
+            }
+        },
+        "AFTER-TEST": {}
+    },
+    {
+        "PRESET": {},
+        "1": {
+            "description": "Test VRF configuration on bond interface.",
+            "1.1": {
+                "type": "POST",
+                "endpoint": "/interfaces/bonding/capability",
+                "schema": {
+                    "ifname": "bond980",
+                    "vrf_name": "6S9kub6S"
+                },
+                "errCode": 0,
+                "httpCode": 200
+            }
+        },
+        "AFTER-TEST": {}
+    }
+]

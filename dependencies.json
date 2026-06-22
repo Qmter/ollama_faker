@@ -1,0 +1,23 @@
+{
+  "/interfaces/bonding/capability": {
+    "preset": [
+      {
+        "endpoint": "/interfaces/bonding/add"
+      },
+      {
+        "endpoint": "/vrf",
+        "action": "add"
+      }
+    ],
+    "verify": "/interfaces/bonding/list",
+    "after": [
+      {
+        "endpoint": "/interfaces/bonding/delete"
+      },
+      {
+        "endpoint": "/vrf",
+        "action": "delete"
+      }
+    ]
+  }
+}
