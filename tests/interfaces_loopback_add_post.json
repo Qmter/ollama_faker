@@ -1,0 +1,54 @@
+[
+  {
+    "test_id": 1,
+    "setup": [],
+    "main_test": {
+      "endpoint": "/interfaces/loopback/add",
+      "method": "POST",
+      "payload": {
+        "ifname": "lo16"
+      },
+      "expected_status": 200
+    },
+    "teardown": [],
+    "description": "Этот API-тест проверяет успешное добавление виртуального интерфейса с именем \"lo16\" на устройстве через метод POST к эндпоинту /interfaces/loopback/add, ожидая статуса 200."
+  },
+  {
+    "test_id": 2,
+    "setup": [
+      {
+        "endpoint": "/vrf",
+        "method": "POST",
+        "payload": {
+          "action": "add",
+          "vrf_name": "1d0MI-z"
+        },
+        "expected_status": 200,
+        "extract_to_variable": "created_vrf_name",
+        "response_extract": "data.vrf_name"
+      }
+    ],
+    "main_test": {
+      "endpoint": "/interfaces/loopback/add",
+      "method": "POST",
+      "payload": {
+        "ifname": "lo1360",
+        "vrf_name": "1d0MI-z"
+      },
+      "expected_status": 200
+    },
+    "teardown": [
+      {
+        "endpoint": "/vrf",
+        "method": "POST",
+        "payload": {
+          "action": "delete",
+          "vrf_name": "1d0MI-z"
+        },
+        "expected_status": 200,
+        "note": "Cleanup created vrf_name"
+      }
+    ],
+    "description": "Этот API-тест проверяет, что запрос на добавление виртуального интерфейса с именем \"lo1360\" в VRF \"1d0MI-z\" по адресу /interfaces/loopback/add с методом POST возвращает статус 200."
+  }
+]

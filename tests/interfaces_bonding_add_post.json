@@ -1,0 +1,40 @@
+[
+  {
+    "test_id": 1,
+    "setup": [
+      {
+        "endpoint": "/vrf",
+        "method": "POST",
+        "payload": {
+          "action": "add",
+          "vrf_name": "AVn"
+        },
+        "expected_status": 200,
+        "extract_to_variable": "created_vrf_name",
+        "response_extract": "data.vrf_name"
+      }
+    ],
+    "main_test": {
+      "endpoint": "/interfaces/bonding/add",
+      "method": "POST",
+      "payload": {
+        "ifname": "bond0",
+        "vrf_name": "AVn"
+      },
+      "expected_status": 200
+    },
+    "teardown": [
+      {
+        "endpoint": "/vrf",
+        "method": "POST",
+        "payload": {
+          "action": "delete",
+          "vrf_name": "AVn"
+        },
+        "expected_status": 200,
+        "note": "Cleanup created vrf_name"
+      }
+    ],
+    "description": "This API test sends a POST request to the \"/interfaces/bonding/add\" endpoint with payload {\"ifname\": \"bond0\", \"vrf_name\": \"AVn\"} and expects a status code of 200."
+  }
+]

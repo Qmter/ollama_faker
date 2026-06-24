@@ -1,0 +1,56 @@
+[
+  {
+    "test_id": 1,
+    "setup": [],
+    "main_test": {
+      "endpoint": "/interfaces/bonding/capability",
+      "method": "POST",
+      "payload": {
+        "ifname": "bond270",
+        "capability": {
+          "hash_policy": "layer2"
+        }
+      },
+      "expected_status": 200
+    },
+    "teardown": [],
+    "description": "Автотест: POST /interfaces/bonding/capability (payload: ['ifname', 'capability'])"
+  },
+  {
+    "test_id": 2,
+    "setup": [],
+    "main_test": {
+      "endpoint": "/interfaces/bonding/capability",
+      "method": "POST",
+      "payload": {
+        "ifname": "bond7362",
+        "capability": {}
+      },
+      "expected_status": 200
+    },
+    "teardown": [],
+    "description": "Автотест: POST /interfaces/bonding/capability (payload: ['ifname', 'capability'])"
+  },
+  {
+    "test_id": 3,
+    "setup": [],
+    "main_test": {
+      "endpoint": "/interfaces/bonding/capability",
+      "method": "POST",
+      "payload": {
+        "ifname": "bond0",
+        "capability": {
+          "link_monitor_period": 1375280986,
+          "enslave": [
+            "vlan963",
+            "vlan4091",
+            "vlan3151"
+          ]
+        }
+      },
+      "expected_status": 200
+    },
+    "teardown": [],
+    "description": "Автотест: POST /interfaces/bonding/capability (payload: ['ifname', 'capability'])"
+  }
+]

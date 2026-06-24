@@ -1,23 +1,25 @@
 {
-  "/interfaces/bonding/capability": {
-    "preset": [
-      {
-        "endpoint": "/interfaces/bonding/add"
-      },
-      {
-        "endpoint": "/vrf",
-        "action": "add"
-      }
-    ],
-    "verify": "/interfaces/bonding/list",
-    "after": [
-      {
-        "endpoint": "/interfaces/bonding/delete"
-      },
-      {
-        "endpoint": "/vrf",
-        "action": "delete"
-      }
-    ]
+  "field_mappings": {
+    "vrf_name": {
+      "provider": "/vrf",
+      "action_create": "add",
+      "action_delete": "delete",
+      "extract": "data.vrf_name",
+      "optional": true
+    },
+    "vrf": {
+      "provider": "/vrf",
+      "action_create": "add",
+      "action_delete": "delete",
+      "extract": "data.vrf",
+      "optional": true
+    },
+    "acl_name": {
+      "provider": "/acl/acl_ipv4",
+      "action_create": "add",
+      "action_delete": "delete",
+      "extract": "data.acl_name",
+      "optional": true
+    }
   }
 }
