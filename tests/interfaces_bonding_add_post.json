@@ -7,7 +7,7 @@
         "method": "POST",
         "payload": {
           "action": "add",
-          "vrf_name": "AVn"
+          "vrf_name": "8vG"
         },
         "expected_status": 200,
         "extract_to_variable": "created_vrf_name",
@@ -19,7 +19,7 @@
       "method": "POST",
       "payload": {
         "ifname": "bond0",
-        "vrf_name": "AVn"
+        "vrf_name": "8vG"
       },
       "expected_status": 200
     },
@@ -29,12 +29,21 @@
         "method": "POST",
         "payload": {
           "action": "delete",
-          "vrf_name": "AVn"
+          "vrf_name": "8vG"
         },
         "expected_status": 200,
         "note": "Cleanup created vrf_name"
+      },
+      {
+        "endpoint": "/interfaces/bonding/delete",
+        "method": "POST",
+        "payload": {
+          "ifname": "bond0"
+        },
+        "expected_status": 200,
+        "note": "Cleanup interface ifname"
       }
     ],
-    "description": "This API test sends a POST request to the \"/interfaces/bonding/add\" endpoint with payload {\"ifname\": \"bond0\", \"vrf_name\": \"AVn\"} and expects a status code of 200."
+    "description": "Автотест: POST /interfaces/bonding/add"
   }
 ]

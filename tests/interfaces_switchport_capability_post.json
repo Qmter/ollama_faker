@@ -1,0 +1,244 @@
+[
+  {
+    "test_id": 1,
+    "setup": [],
+    "main_test": {
+      "endpoint": "/interfaces/switchport/capability",
+      "method": "POST",
+      "payload": {
+        "port": [],
+        "mac_address_table_aging_time": 663.75,
+        "dhcp_snooping": {
+          "mode": 0
+        }
+      },
+      "expected_status": 200
+    },
+    "teardown": [],
+    "description": "Автотест: POST /interfaces/switchport/capability"
+  },
+  {
+    "test_id": 2,
+    "setup": [],
+    "main_test": {
+      "endpoint": "/interfaces/switchport/capability",
+      "method": "POST",
+      "payload": {
+        "port": [
+          {
+            "ifname": "switchport3",
+            "port_security": true
+          },
+          {
+            "ifname": "switchport5",
+            "mtu": 10240,
+            "igmp_snooping": false
+          },
+          {
+            "ifname": "switchport1",
+            "autonegotiation": {
+              "on": 0,
+              "duplex": "half",
+              "speed": 1000
+            },
+            "igmp_snooping": false,
+            "port_security": true,
+            "mac_address_table_learn_limit": null
+          }
+        ]
+      },
+      "expected_status": 200
+    },
+    "teardown": [],
+    "description": "Автотест: POST /interfaces/switchport/capability"
+  },
+  {
+    "test_id": 3,
+    "setup": [],
+    "main_test": {
+      "endpoint": "/interfaces/switchport/capability",
+      "method": "POST",
+      "payload": {
+        "port": [
+          {
+            "ifname": "switchport4",
+            "port_security": true
+          },
+          {
+            "ifname": "switchport3",
+            "autonegotiation": {
+              "on": 0,
+              "duplex": "half",
+              "speed": 100
+            },
+            "mtu": 2048,
+            "igmp_snooping": true,
+            "port_security": true
+          },
+          {
+            "ifname": "switchport2",
+            "mtu": 2048,
+            "igmp_snooping": true,
+            "mac_address_table_learn_limit": null
+          }
+        ],
+        "mac_address_table_aging_time": 4316.25,
+        "dhcp_snooping": {
+          "mode": 1,
+          "vlans": "9730,4-35,754-753,4-339,1,1-6317,5738,3-40,840,82,8,1,3-699,9006-682,79,4425,8-1148,7,57,6633,3303,2-46,486-668,346,70-255,553-1,55-85,71,2542"
+        },
+        "voicevlan": {
+          "mac_addr": "FfD93b355B3B",
+          "mac_mask": "F004.4dE8.84Be",
+          "vlan": 2903
+        }
+      },
+      "expected_status": 200
+    },
+    "teardown": [],
+    "description": "Автотест: POST /interfaces/switchport/capability"
+  },
+  {
+    "test_id": 4,
+    "setup": [],
+    "main_test": {
+      "endpoint": "/interfaces/switchport/capability",
+      "method": "POST",
+      "payload": {
+        "port": [
+          {
+            "ifname": "switchport4",
+            "mtu": 10240,
+            "igmp_snooping": false,
+            "port_security": true
+          },
+          {
+            "ifname": "switchport3",
+            "autonegotiation": {
+              "on": 1
+            },
+            "mtu": 2048,
+            "port_security": true
+          },
+          {
+            "ifname": "switchport5",
+            "autonegotiation": {
+              "on": 0,
+              "duplex": "full",
+              "speed": 10
+            },
+            "mtu": 1522,
+            "igmp_snooping": false
+          },
+          {
+            "ifname": "switchport6",
+            "autonegotiation": {
+              "on": 0,
+              "duplex": "full",
+              "speed": 1000
+            },
+            "mtu": 10240
+          },
+          {
+            "ifname": "switchport6",
+            "autonegotiation": {
+              "on": 1
+            },
+            "igmp_snooping": false
+          },
+          {
+            "ifname": "switchport2",
+            "autonegotiation": {
+              "on": 0,
+              "duplex": "half",
+              "speed": 1000
+            },
+            "mtu": 10240,
+            "igmp_snooping": true,
+            "port_security": false
+          },
+          {
+            "ifname": "switchport7",
+            "autonegotiation": {
+              "on": 1
+            },
+            "mtu": 2048,
+            "port_security": false,
+            "mac_address_table_learn_limit": 2578
+          },
+          {
+            "ifname": "switchport7",
+            "autonegotiation": {
+              "on": 0,
+              "duplex": "full",
+              "speed": 100
+            },
+            "mtu": 10240,
+            "igmp_snooping": false,
+            "mac_address_table_learn_limit": 2359
+          }
+        ],
+        "mac_address_table_aging_time": 765.0,
+        "dhcp_snooping": {
+          "mode": 0
+        },
+        "igmp_snooping": true
+      },
+      "expected_status": 200
+    },
+    "teardown": [],
+    "description": "Автотест: POST /interfaces/switchport/capability"
+  },
+  {
+    "test_id": 5,
+    "setup": [],
+    "main_test": {
+      "endpoint": "/interfaces/switchport/capability",
+      "method": "POST",
+      "payload": {
+        "mac_address_table_aging_time": 1083.75,
+        "voicevlan": {
+          "mac_addr": "27:04:62:dd:aA:9f",
+          "mac_mask": "6EBC602F0abe",
+          "vlan": 2651
+        }
+      },
+      "expected_status": 200
+    },
+    "teardown": [],
+    "description": "Автотест: POST /interfaces/switchport/capability"
+  },
+  {
+    "test_id": 6,
+    "setup": [],
+    "main_test": {
+      "endpoint": "/interfaces/switchport/capability",
+      "method": "POST",
+      "payload": {
+        "voicevlan": {
+          "mac_addr": "b8b8.bAC4.22CB",
+          "mac_mask": "Fd1a.8034.5C9B",
+          "vlan": 3926
+        }
+      },
+      "expected_status": 200
+    },
+    "teardown": [],
+    "description": "Автотест: POST /interfaces/switchport/capability"
+  },
+  {
+    "test_id": 7,
+    "setup": [],
+    "main_test": {
+      "endpoint": "/interfaces/switchport/capability",
+      "method": "POST",
+      "payload": {
+        "cpu": {},
+        "mac_address_table_aging_time": 7046.25
+      },
+      "expected_status": 200
+    },
+    "teardown": [],
+    "description": "Автотест: POST /interfaces/switchport/capability"
+  }
+]

@@ -1,56 +1,157 @@
 [
   {
     "test_id": 1,
-    "setup": [],
+    "setup": [
+      {
+        "endpoint": "/interfaces/bonding/add",
+        "method": "POST",
+        "payload": {
+          "ifname": "bond116"
+        },
+        "expected_status": 200,
+        "extract_to_variable": "created_ifname",
+        "response_extract": "data.ifname"
+      }
+    ],
     "main_test": {
       "endpoint": "/interfaces/bonding/capability",
       "method": "POST",
       "payload": {
-        "ifname": "bond270",
+        "ifname": "bond116",
         "capability": {
-          "hash_policy": "layer2"
+          "hash_policy": "layer3+4",
+          "link_monitor_period": 1292286441
         }
       },
       "expected_status": 200
     },
-    "teardown": [],
-    "description": "Автотест: POST /interfaces/bonding/capability (payload: ['ifname', 'capability'])"
+    "teardown": [
+      {
+        "endpoint": "/interfaces/bonding/delete",
+        "method": "POST",
+        "payload": {
+          "ifname": "bond116"
+        },
+        "expected_status": 200,
+        "note": "Cleanup interface ifname"
+      }
+    ],
+    "description": "Автотест: POST /interfaces/bonding/capability"
   },
   {
     "test_id": 2,
-    "setup": [],
-    "main_test": {
-      "endpoint": "/interfaces/bonding/capability",
-      "method": "POST",
-      "payload": {
-        "ifname": "bond7362",
-        "capability": {}
-      },
-      "expected_status": 200
-    },
-    "teardown": [],
-    "description": "Автотест: POST /interfaces/bonding/capability (payload: ['ifname', 'capability'])"
-  },
-  {
-    "test_id": 3,
-    "setup": [],
+    "setup": [
+      {
+        "endpoint": "/interfaces/bonding/add",
+        "method": "POST",
+        "payload": {
+          "ifname": "bond0"
+        },
+        "expected_status": 200,
+        "extract_to_variable": "created_ifname",
+        "response_extract": "data.ifname"
+      }
+    ],
     "main_test": {
       "endpoint": "/interfaces/bonding/capability",
       "method": "POST",
       "payload": {
         "ifname": "bond0",
         "capability": {
-          "link_monitor_period": 1375280986,
+          "link_monitor_period": 741183721
+        }
+      },
+      "expected_status": 200
+    },
+    "teardown": [
+      {
+        "endpoint": "/interfaces/bonding/delete",
+        "method": "POST",
+        "payload": {
+          "ifname": "bond0"
+        },
+        "expected_status": 200,
+        "note": "Cleanup interface ifname"
+      }
+    ],
+    "description": "Автотест: POST /interfaces/bonding/capability"
+  },
+  {
+    "test_id": 3,
+    "setup": [
+      {
+        "endpoint": "/interfaces/bonding/add",
+        "method": "POST",
+        "payload": {
+          "ifname": "bond0"
+        },
+        "expected_status": 200,
+        "extract_to_variable": "created_ifname",
+        "response_extract": "data.ifname"
+      }
+    ],
+    "main_test": {
+      "endpoint": "/interfaces/bonding/capability",
+      "method": "POST",
+      "payload": {
+        "ifname": "bond0",
+        "capability": {}
+      },
+      "expected_status": 200
+    },
+    "teardown": [
+      {
+        "endpoint": "/interfaces/bonding/delete",
+        "method": "POST",
+        "payload": {
+          "ifname": "bond0"
+        },
+        "expected_status": 200,
+        "note": "Cleanup interface ifname"
+      }
+    ],
+    "description": "Автотест: POST /interfaces/bonding/capability"
+  },
+  {
+    "test_id": 4,
+    "setup": [
+      {
+        "endpoint": "/interfaces/bonding/add",
+        "method": "POST",
+        "payload": {
+          "ifname": "bond41"
+        },
+        "expected_status": 200,
+        "extract_to_variable": "created_ifname",
+        "response_extract": "data.ifname"
+      }
+    ],
+    "main_test": {
+      "endpoint": "/interfaces/bonding/capability",
+      "method": "POST",
+      "payload": {
+        "ifname": "bond41",
+        "capability": {
           "enslave": [
-            "vlan963",
-            "vlan4091",
-            "vlan3151"
+            "eth0",
+            "eth1.0",
+            "eth82.972"
           ]
         }
       },
       "expected_status": 200
     },
-    "teardown": [],
-    "description": "Автотест: POST /interfaces/bonding/capability (payload: ['ifname', 'capability'])"
+    "teardown": [
+      {
+        "endpoint": "/interfaces/bonding/delete",
+        "method": "POST",
+        "payload": {
+          "ifname": "bond41"
+        },
+        "expected_status": 200,
+        "note": "Cleanup interface ifname"
+      }
+    ],
+    "description": "Автотест: POST /interfaces/bonding/capability"
   }
 ]

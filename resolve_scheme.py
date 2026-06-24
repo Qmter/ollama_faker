@@ -1,6 +1,7 @@
 import json
 import logging
 import time
+import sys
 
 logger = logging.getLogger(__name__)
 
@@ -130,25 +131,30 @@ class ResolveScheme:
         try:
             method = method.lower()
             if method not in ['get', 'post', 'put', 'patch', 'delete', 'head', 'options']:
-                raise ValueError(f"Неподдерживаемый метод HTTP: {method}")
+                logger.error(f"Неподдерживаемый метод HTTP: {method}")
+                sys.exit()
 
             import os
             if not os.path.exists(openapi_file):
-                raise FileNotFoundError(f"Файл OpenAPI не найден: {openapi_file}")
+                logger.error(f"Файл OpenAPI не найден: {openapi_file}")
+                sys.exit()
 
             with open(openapi_file, 'r', encoding='utf-8') as f:
                 schema = json.load(f)
             logger.debug(f"Файл OpenAPI загружен ({os.path.getsize(openapi_file)} байт)")
 
             if 'paths' not in schema:
-                raise ValueError("Файл не содержит ключа 'paths'")
+                logger.error("Файл не содержит ключа 'paths'")
+                sys.exit()
 
             paths = schema.get('paths', {})
             if endpoint_path not in paths:
-                raise KeyError(f"Эндпоинт '{endpoint_path}' не найден. Доступные: {list(paths.keys())[:5]}...")
+                logger.error(f"Эндпоинт '{endpoint_path}' не найден.")
+                sys.exit()
 
             if method not in paths[endpoint_path]:
-                raise KeyError(f"Метод '{method}' не найден для '{endpoint_path}'")
+                logger.error(f"Метод '{method}' не найден для '{endpoint_path}'")
+                sys.exit()
 
             components = schema.get('components', {})
             logger.debug("Запускаю рекурсивное разрешение $ref...")
@@ -160,4 +166,4 @@ class ResolveScheme:
 
         except Exception as e:
             logger.error(f"Ошибка в resolve_endpoint: {e}", exc_info=True)
-            raise
+            sys.exit()

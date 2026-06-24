@@ -21,5 +21,14 @@
       "extract": "data.acl_name",
       "optional": true
     }
+  },
+  "interface_rules": {
+    "ifname": {
+      "prefixes": {
+        "bond": { "create": "/interfaces/bonding/add", "delete": "/interfaces/bonding/delete" },
+        "lo":   { "create": "/interfaces/loopback/add", "delete": "/interfaces/loopback/delete" },
+        "br":   { "create": "/interfaces/bridge/add", "delete": "/interfaces/bridge/delete" }
+      }
+    }
   }
 }

@@ -1,0 +1,336 @@
+[
+  {
+    "test_id": 1,
+    "setup": [
+      {
+        "endpoint": "/interfaces/bridge/add",
+        "method": "POST",
+        "payload": {
+          "ifname": "br0"
+        },
+        "expected_status": 200,
+        "extract_to_variable": "created_ifname",
+        "response_extract": "data.ifname"
+      }
+    ],
+    "main_test": {
+      "endpoint": "/interfaces/bridge/capability",
+      "method": "POST",
+      "payload": {
+        "ifname": "br0",
+        "capability": {
+          "included_interfaces": [
+            "eth156.0",
+            "vlan1049"
+          ]
+        }
+      },
+      "expected_status": 200
+    },
+    "teardown": [
+      {
+        "endpoint": "/interfaces/bridge/delete",
+        "method": "POST",
+        "payload": {
+          "ifname": "br0"
+        },
+        "expected_status": 200,
+        "note": "Cleanup interface ifname"
+      }
+    ],
+    "description": "Автотест: POST /interfaces/bridge/capability"
+  },
+  {
+    "test_id": 2,
+    "setup": [
+      {
+        "endpoint": "/interfaces/bridge/add",
+        "method": "POST",
+        "payload": {
+          "ifname": "br3"
+        },
+        "expected_status": 200,
+        "extract_to_variable": "created_ifname",
+        "response_extract": "data.ifname"
+      }
+    ],
+    "main_test": {
+      "endpoint": "/interfaces/bridge/capability",
+      "method": "POST",
+      "payload": {
+        "ifname": "br3",
+        "capability": {
+          "mode": {
+            "mode_type": 1
+          },
+          "ageing_time": 2166789482
+        }
+      },
+      "expected_status": 200
+    },
+    "teardown": [
+      {
+        "endpoint": "/interfaces/bridge/delete",
+        "method": "POST",
+        "payload": {
+          "ifname": "br3"
+        },
+        "expected_status": 200,
+        "note": "Cleanup interface ifname"
+      }
+    ],
+    "description": "Автотест: POST /interfaces/bridge/capability"
+  },
+  {
+    "test_id": 3,
+    "setup": [
+      {
+        "endpoint": "/interfaces/bridge/add",
+        "method": "POST",
+        "payload": {
+          "ifname": "br9058"
+        },
+        "expected_status": 200,
+        "extract_to_variable": "created_ifname",
+        "response_extract": "data.ifname"
+      }
+    ],
+    "main_test": {
+      "endpoint": "/interfaces/bridge/capability",
+      "method": "POST",
+      "payload": {
+        "ifname": "br9058",
+        "capability": {
+          "mode": {
+            "mode_type": 0
+          },
+          "ageing_time": 2032431689,
+          "max_mac_addresses": 0,
+          "included_interfaces": []
+        }
+      },
+      "expected_status": 200
+    },
+    "teardown": [
+      {
+        "endpoint": "/interfaces/bridge/delete",
+        "method": "POST",
+        "payload": {
+          "ifname": "br9058"
+        },
+        "expected_status": 200,
+        "note": "Cleanup interface ifname"
+      }
+    ],
+    "description": "Автотест: POST /interfaces/bridge/capability"
+  },
+  {
+    "test_id": 4,
+    "setup": [
+      {
+        "endpoint": "/interfaces/bridge/add",
+        "method": "POST",
+        "payload": {
+          "ifname": "br0"
+        },
+        "expected_status": 200,
+        "extract_to_variable": "created_ifname",
+        "response_extract": "data.ifname"
+      }
+    ],
+    "main_test": {
+      "endpoint": "/interfaces/bridge/capability",
+      "method": "POST",
+      "payload": {
+        "ifname": "br0",
+        "capability": {
+          "mode": {
+            "mode_type": 0
+          },
+          "ageing_time": 3304744148,
+          "max_mac_addresses": 0
+        }
+      },
+      "expected_status": 200
+    },
+    "teardown": [
+      {
+        "endpoint": "/interfaces/bridge/delete",
+        "method": "POST",
+        "payload": {
+          "ifname": "br0"
+        },
+        "expected_status": 200,
+        "note": "Cleanup interface ifname"
+      }
+    ],
+    "description": "Автотест: POST /interfaces/bridge/capability"
+  },
+  {
+    "test_id": 5,
+    "setup": [
+      {
+        "endpoint": "/interfaces/bridge/add",
+        "method": "POST",
+        "payload": {
+          "ifname": "br0"
+        },
+        "expected_status": 200,
+        "extract_to_variable": "created_ifname",
+        "response_extract": "data.ifname"
+      }
+    ],
+    "main_test": {
+      "endpoint": "/interfaces/bridge/capability",
+      "method": "POST",
+      "payload": {
+        "ifname": "br0",
+        "capability": {
+          "mode": {
+            "mode_type": 0
+          },
+          "ageing_time": 496555151
+        }
+      },
+      "expected_status": 200
+    },
+    "teardown": [
+      {
+        "endpoint": "/interfaces/bridge/delete",
+        "method": "POST",
+        "payload": {
+          "ifname": "br0"
+        },
+        "expected_status": 200,
+        "note": "Cleanup interface ifname"
+      }
+    ],
+    "description": "Автотест: POST /interfaces/bridge/capability"
+  },
+  {
+    "test_id": 6,
+    "setup": [
+      {
+        "endpoint": "/interfaces/bridge/add",
+        "method": "POST",
+        "payload": {
+          "ifname": "br0"
+        },
+        "expected_status": 200,
+        "extract_to_variable": "created_ifname",
+        "response_extract": "data.ifname"
+      }
+    ],
+    "main_test": {
+      "endpoint": "/interfaces/bridge/capability",
+      "method": "POST",
+      "payload": {
+        "ifname": "br0",
+        "capability": {
+          "mode": {
+            "mode_type": 0
+          },
+          "included_interfaces": [
+            "eth71.426"
+          ]
+        }
+      },
+      "expected_status": 200
+    },
+    "teardown": [
+      {
+        "endpoint": "/interfaces/bridge/delete",
+        "method": "POST",
+        "payload": {
+          "ifname": "br0"
+        },
+        "expected_status": 200,
+        "note": "Cleanup interface ifname"
+      }
+    ],
+    "description": "Автотест: POST /interfaces/bridge/capability"
+  },
+  {
+    "test_id": 7,
+    "setup": [
+      {
+        "endpoint": "/interfaces/bridge/add",
+        "method": "POST",
+        "payload": {
+          "ifname": "br8926"
+        },
+        "expected_status": 200,
+        "extract_to_variable": "created_ifname",
+        "response_extract": "data.ifname"
+      }
+    ],
+    "main_test": {
+      "endpoint": "/interfaces/bridge/capability",
+      "method": "POST",
+      "payload": {
+        "ifname": "br8926",
+        "capability": {}
+      },
+      "expected_status": 200
+    },
+    "teardown": [
+      {
+        "endpoint": "/interfaces/bridge/delete",
+        "method": "POST",
+        "payload": {
+          "ifname": "br8926"
+        },
+        "expected_status": 200,
+        "note": "Cleanup interface ifname"
+      }
+    ],
+    "description": "Автотест: POST /interfaces/bridge/capability"
+  },
+  {
+    "test_id": 8,
+    "setup": [
+      {
+        "endpoint": "/interfaces/bridge/add",
+        "method": "POST",
+        "payload": {
+          "ifname": "br6"
+        },
+        "expected_status": 200,
+        "extract_to_variable": "created_ifname",
+        "response_extract": "data.ifname"
+      }
+    ],
+    "main_test": {
+      "endpoint": "/interfaces/bridge/capability",
+      "method": "POST",
+      "payload": {
+        "ifname": "br6",
+        "capability": {
+          "mode": {
+            "mode_type": 2,
+            "down_time": 433586390
+          },
+          "ageing_time": 1094171563,
+          "max_mac_addresses": 685986,
+          "included_interfaces": [
+            "eth59.0",
+            "kITZHxDJO09BoDTFA0"
+          ]
+        }
+      },
+      "expected_status": 200
+    },
+    "teardown": [
+      {
+        "endpoint": "/interfaces/bridge/delete",
+        "method": "POST",
+        "payload": {
+          "ifname": "br6"
+        },
+        "expected_status": 200,
+        "note": "Cleanup interface ifname"
+      }
+    ],
+    "description": "Автотест: POST /interfaces/bridge/capability"
+  }
+]
