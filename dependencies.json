@@ -1,34 +1,170 @@
 {
   "field_mappings": {
     "vrf_name": {
-      "provider": "/vrf",
-      "action_create": "add",
-      "action_delete": "delete",
-      "extract": "data.vrf_name",
+      "setup": {
+        "endpoint": "/vrf",
+        "payload": {
+          "action": "add",
+          "vrf_name": "{{vrf_name}}"
+        },
+        "extract_to_variable": "created_vrf_name",
+        "response_extract": "data.vrf_name"
+      },
+      "teardown": {
+        "endpoint": "/vrf",
+        "payload": {
+          "action": "delete",
+          "vrf_name": "{{vrf_name}}"
+        },
+        "note": "Cleanup created vrf_name"
+      },
       "optional": true
     },
     "vrf": {
-      "provider": "/vrf",
-      "action_create": "add",
-      "action_delete": "delete",
-      "extract": "data.vrf",
+      "setup": {
+        "endpoint": "/vrf",
+        "payload": {
+          "action": "add",
+          "vrf": "{{vrf}}"
+        },
+        "extract_to_variable": "created_vrf",
+        "response_extract": "data.vrf"
+      },
+      "teardown": {
+        "endpoint": "/vrf",
+        "payload": {
+          "action": "delete",
+          "vrf": "{{vrf}}"
+        },
+        "note": "Cleanup created vrf"
+      },
       "optional": true
     },
     "acl_name": {
-      "provider": "/acl/acl_ipv4",
-      "action_create": "add",
-      "action_delete": "delete",
-      "extract": "data.acl_name",
+      "setup": {
+        "endpoint": "/acl/acl_ipv4",
+        "payload": {
+            "action": {
+              "add": {
+                "acl_name": "{{acl_name}}",
+                "rule": {
+                  "dpi": {
+                    "dpi_protocol": "sina(weibo)"
+                  }
+                }
+              }
+            }
+        },
+        "extract_to_variable": "created_acl_name",
+        "response_extract": "data.acl_name"
+      },
+      "teardown": {
+        "endpoint": "/acl/acl_ipv4",
+        "payload": {
+          "action": {
+            "delete": {
+              "acl_name": "{{acl_name}}"
+            }
+          }
+      },
+        "note": "Cleanup created acl_name"
+      },
       "optional": true
     }
   },
   "interface_rules": {
     "ifname": {
-      "prefixes": {
-        "bond": { "create": "/interfaces/bonding/add", "delete": "/interfaces/bonding/delete" },
-        "lo":   { "create": "/interfaces/loopback/add", "delete": "/interfaces/loopback/delete" },
-        "br":   { "create": "/interfaces/bridge/add", "delete": "/interfaces/bridge/delete" }
-      }
+      "rules": [
+        {
+          "pattern": "^eth(0|[1-9][0-9]{0,3})([\\.](0|[1-9][0-9]{0,3}))$",
+          "env": "DEVICE_ETH_VLAN_IFNAMES",
+          "create": "/interfaces/eth_vlan/add",
+          "delete": "/interfaces/eth_vlan/delete"
+        },
+        {
+          "pattern": "^eth(0|[1-9][0-9]{0,3})$",
+          "env": "DEVICE_ETH_IFNAMES",
+          "setup": {
+            "endpoint": "/interfaces/shutdown",
+            "payload": {
+              "ifname": "{{ifname}}",
+              "adm_state": true
+            },
+            "note": "Reset physical ethernet to defaults"
+          },
+          "teardown": [{
+            "endpoint": "/interfaces/common/reset_interface",
+            "payload": {
+              "ifname": "{{ifname}}"
+            },
+            "note": "Reset physical ethernet to defaults"
+          }
+        ]
+        },
+        {
+          "pattern": "^switchport[1-8]$",
+          "env": "DEVICE_SWITCHPORT_IFNAMES",
+          "teardown": {
+            "endpoint": "/interfaces/common/reset_interface",
+            "payload": {
+              "ifname": "{{ifname}}"
+            },
+            "note": "Reset switchport to defaults"
+          }
+        },
+        {
+          "prefix": "bond",
+          "create": "/interfaces/bonding/add",
+          "delete": "/interfaces/bonding/delete"
+        },
+        {
+          "prefix": "lo",
+          "create": "/interfaces/loopback/add",
+          "delete": "/interfaces/loopback/delete"
+        },
+        {
+          "prefix": "br",
+          "create": "/interfaces/bridge/add",
+          "delete": "/interfaces/bridge/delete"
+        },
+        {
+          "prefix": "vlan",
+          "env": "DEVICE_VLAN_IFNAMES",
+          "create": "/interfaces/vlan/add",
+          "delete": "/interfaces/vlan/delete"
+        },
+        {
+          "prefix": "tunnel",
+          "setup": {
+            "endpoint": "/interfaces/tunnel/add",
+            "payload": {
+              "ifname": "{{ifname}}",
+              "settings": {
+                "source": "1.1.1.1"
+              }
+            },
+            "extract_to_variable": "created_ifname_tunnel",
+            "response_extract": "data.ifname"
+          },
+          "teardown": [
+            {
+            "endpoint": "/interfaces/tunnel/delete",
+            "payload": {
+              "ifname": "{{ifname}}"
+            },
+            "note": "Cleanup created ifname_tunnel"
+          },
+          {
+            "endpoint": "/interfaces/shutdown",
+            "payload": {
+              "ifname": "{{ifname}}",
+              "adm_state": false
+            },
+            "note": "Reset physical ethernet to defaults"
+          }
+          ]
+        }
+      ]
     }
   }
 }

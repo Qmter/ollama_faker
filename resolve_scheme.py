@@ -75,51 +75,106 @@ class ResolveScheme:
             raise
 
     @staticmethod
+    def _extract_rules_from_schema(obj: dict) -> dict:
+        """Собирает ограничения из узла JSON Schema."""
+        if not isinstance(obj, dict):
+            return {}
+
+        current_rules = {}
+        if 'type' in obj and isinstance(obj['type'], (str, list)):
+            current_rules['type'] = obj['type']
+        if 'pattern' in obj and isinstance(obj['pattern'], str):
+            current_rules['pattern'] = obj['pattern']
+        if 'minimum' in obj and isinstance(obj['minimum'], (int, float)):
+            current_rules['minimum'] = obj['minimum']
+        if 'maximum' in obj and isinstance(obj['maximum'], (int, float)):
+            current_rules['maximum'] = obj['maximum']
+        if 'enum' in obj and isinstance(obj['enum'], list):
+            current_rules['enum'] = obj['enum']
+
+        if 'anyOf' in obj and isinstance(obj['anyOf'], list):
+            patterns = [
+                item['pattern'] for item in obj['anyOf']
+                if isinstance(item, dict) and 'pattern' in item and isinstance(item['pattern'], str)
+            ]
+            if patterns:
+                current_rules['pattern'] = patterns if len(patterns) > 1 else patterns[0]
+
+        return current_rules
+
+    @staticmethod
+    def _iter_schema_branches(schema: dict):
+        """Итерирует ветки oneOf/anyOf/allOf, пропуская null."""
+        if not isinstance(schema, dict):
+            return
+        for keyword in ('oneOf', 'anyOf', 'allOf'):
+            for branch in schema.get(keyword, []):
+                if isinstance(branch, dict) and branch.get('type') != 'null':
+                    yield branch
+
+    @staticmethod
+    def _merge_field_schema(existing: dict, new: dict) -> dict:
+        """Объединяет под-схемы одного пути из разных веток oneOf."""
+        if existing == new:
+            return existing
+        if isinstance(existing, dict) and 'oneOf' in existing:
+            branches = list(existing['oneOf'])
+            if new not in branches:
+                branches.append(new)
+            return {'oneOf': branches}
+        return {'oneOf': [existing, new]}
+
+    @staticmethod
+    def _store_field_schema(results: dict, path: str, schema: dict):
+        if path in results:
+            results[path] = ResolveScheme._merge_field_schema(results[path], schema)
+        else:
+            results[path] = schema
+
+    @staticmethod
+    def extract_field_schemas(schema, path=""):
+        """
+        Обходит схему и возвращает {dotted_path: sub_schema}.
+        Рекурсивно раскрывает oneOf/anyOf/allOf — поля из всех веток.
+        """
+        results = {}
+        if not isinstance(schema, dict):
+            return results
+
+        if 'properties' in schema and isinstance(schema['properties'], dict):
+            for prop_name, prop_schema in schema['properties'].items():
+                child_path = f"{path}.{prop_name}" if path else prop_name
+                ResolveScheme._store_field_schema(results, child_path, prop_schema)
+                nested = ResolveScheme.extract_field_schemas(prop_schema, child_path)
+                for npath, nschema in nested.items():
+                    ResolveScheme._store_field_schema(results, npath, nschema)
+
+        if 'items' in schema and isinstance(schema['items'], dict):
+            items_schema = schema['items']
+            if 'properties' in items_schema:
+                item_path = f"{path}[]" if path else "[]"
+                nested = ResolveScheme.extract_field_schemas(items_schema, item_path)
+                for npath, nschema in nested.items():
+                    ResolveScheme._store_field_schema(results, npath, nschema)
+
+        for branch in ResolveScheme._iter_schema_branches(schema):
+            nested = ResolveScheme.extract_field_schemas(branch, path)
+            for npath, nschema in nested.items():
+                ResolveScheme._store_field_schema(results, npath, nschema)
+
+        return results
+
+    @staticmethod
     def find_all_patterns_min_max(schema):
         results = {}
         logger.debug("Начинаю поиск pattern/minimum/maximum/enum/type в схеме")
 
-        def _deep_search(obj, field_name=""):
-            if not isinstance(obj, dict):
-                return
+        for field_path, field_schema in ResolveScheme.extract_field_schemas(schema).items():
+            rules = ResolveScheme._extract_rules_from_schema(field_schema)
+            if rules:
+                results[field_path] = rules
+                logger.debug(f"Извлечены правила для поля '{field_path}': {rules}")
 
-            current_rules = {}
-            if 'type' in obj and isinstance(obj['type'], (str, list)):
-                current_rules['type'] = obj['type']
-            if 'pattern' in obj and isinstance(obj['pattern'], str):
-                current_rules['pattern'] = obj['pattern']
-            if 'minimum' in obj and isinstance(obj['minimum'], (int, float)):
-                current_rules['minimum'] = obj['minimum']
-            if 'maximum' in obj and isinstance(obj['maximum'], (int, float)):
-                current_rules['maximum'] = obj['maximum']
-            if 'enum' in obj and isinstance(obj['enum'], list):
-                current_rules['enum'] = obj['enum']
-
-            if 'anyOf' in obj and isinstance(obj['anyOf'], list):
-                patterns = [
-                    item['pattern'] for item in obj['anyOf']
-                    if isinstance(item, dict) and 'pattern' in item and isinstance(item['pattern'], str)
-                ]
-                if patterns:
-                    current_rules['pattern'] = patterns if len(patterns) > 1 else patterns[0]
-
-            if current_rules and field_name:
-                results[field_name] = current_rules
-                logger.debug(f"Извлечены правила для поля '{field_name}': {current_rules}")
-
-            if 'properties' in obj and isinstance(obj['properties'], dict):
-                for prop_name, prop_schema in obj['properties'].items():
-                    _deep_search(prop_schema, prop_name)
-
-            for key, value in obj.items():
-                if key not in ('properties', 'anyOf', 'pattern', 'minimum', 'maximum', 'enum', 'type'):
-                    if isinstance(value, dict):
-                        _deep_search(value, field_name)
-                    elif isinstance(value, list):
-                        for item in value:
-                            _deep_search(item, field_name)
-
-        _deep_search(schema)
         logger.info(f"Извлечение правил завершено. Найдено ограничений для {len(results)} полей.")
         return results
 
