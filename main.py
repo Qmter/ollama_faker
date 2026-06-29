@@ -5,6 +5,7 @@ import copy
 import time
 import logging
 import argparse
+from dataclasses import dataclass
 from pathlib import Path
 from jsf import JSF
 from resolve_scheme import ResolveScheme
@@ -825,110 +826,83 @@ def build_minimal_payload(schema: dict) -> dict:
     return _minimal_object_composed(schema)
 
 
-def generate_value_coverage_payloads(schema: dict) -> list:
+def generate_value_coverage_payloads(schema: dict, *, compact: bool = False) -> list:
     """
-    Генерирует пейлоады: для каждого поля — отдельный тест на каждое целевое значение.
-    База — минимальный валидный пейлоад (только required), без лишних случайных полей.
-    Например, для схемы:
-    {
-        "type": "object",
-        "properties": {
-            "name": {
-                "type": "string"
-            }
-        }
-    }
-    будет сгенерирован пейлоад:
-    {
-        "name": "test"
-    }
+    Генерирует пейлоады для покрытия enum/boolean/границ.
+    Для action oneOf — покрытие по веткам rule type без дубля add/delete.
+    compact=True — большие enum (>10) сворачивает до 3 значений.
     """
-    field_schemas = ResolveScheme.extract_field_schemas(schema) # Извлекаем все поля из схемы
-    minimal_base = build_minimal_payload(schema) # Строим минимальный пейлоад
-    payloads = [] # Создаем пустой список для результата
-    seen = set() # Создаем пустое множество для результата
-    skipped = 0 # Создаем переменную для количества пропущенных значений
-    covered_targets = set() # Создаем пустой множество для результата
-    failed_targets = [] # Создаем пустой список для результата
+    field_schemas = ResolveScheme.extract_field_schemas(schema)
+    path_values = _filter_coverage_paths(
+        {
+            path: collect_test_values(field_schema)
+            for path, field_schema in field_schemas.items()
+            if not path.endswith("[]")
+        },
+        field_schemas,
+    )
+    all_paths = set(path_values)
 
-    path_values = {} # Создаем пустой словарь для результата
-    for path, field_schema in field_schemas.items():
-        if path.endswith("[]"):
-            continue # Если путь заканчивается на [], пропускаем
-        path_values[path] = collect_test_values(field_schema)
+    slices = _discover_coverage_slices(schema)
+    if not slices:
+        return _generate_flat_coverage(schema, path_values, field_schemas, compact)
 
-    def _target_key(path, value):
-        """
-        Возвращает ключ для целевого значения.
-        Ключ состоит из пути и значения, преобразованного в строку.
-        Например, для path="data.name" и value="test" ключ будет ("data.name", "test").
-        """
-        return (path, json.dumps(value, sort_keys=True, ensure_ascii=False))
+    logger.info(
+        f"Покрытие по веткам: {len(slices)} slice(s)"
+        + (" (compact enum)" if compact else "")
+    )
 
-    def _add(payload, label="", path=None, value=None):
-        """
-        Добавляет пейлоад в список.
-        Например, для payload={"name": "test"} и label="name=test" будет добавлен пейлоад в список.
-        Если пейлоад уже был добавлен, пропускаем его.
-        Если пейлоад не валидный, пропускаем его и добавляем в список failed_targets.
-        Если пейлоад валидный, добавляем его в список payloads и добавляем в множество covered_targets.
-        Если путь не None, добавляем в множество covered_targets ключ для целевого значения.
-        Если путь None, пропускаем.
-        Возвращает True, если пейлоад был добавлен, False если не был добавлен.
-        """
-        nonlocal skipped
-        payload = _coerce_payload_to_schema(payload, schema)
-        key = _payload_fingerprint(payload)
-        if key in seen:
-            if path is not None:
-                covered_targets.add(_target_key(path, value))
-            return True
-        valid, reason = _validate_payload(payload, schema)
-        if not valid:
-            skipped += 1
-            if path is not None:
-                failed_targets.append((path, value, reason))
-            logger.debug(f"Пропуск ({label}): {reason}")
-            return False
-        seen.add(key)
-        payloads.append(copy.deepcopy(payload))
-        if path is not None:
-            covered_targets.add(_target_key(path, value))
-        return True
+    payloads: list = []
+    seen_payloads: set = set()
+    covered_targets: set = set()
+    skipped_estimate = 0
 
-    _add(minimal_base, "minimal")
-
-    for path, test_values in sorted(path_values.items()):
-        for value in test_values:
-            variant = copy.deepcopy(minimal_base)
-            set_field_test_value(variant, schema, path, value)
-            _add(variant, f"{path}={value!r}", path=path, value=value)
-
-    expected_targets = { # Создаем множество для целевых значений
-        _target_key(path, value)
-        for path, values in path_values.items() # Для каждого пути и значений
-        for value in values # Для каждого значения
-    } # Возвращаем множество целевых значений
-
-    missing_targets = expected_targets - covered_targets # Создаем множество для целевых значений, которые не были покрыты
-    if missing_targets: # Если есть не покрытые целевые значения
-        logger.warning(
-            f"Не покрыто целевых значений: {len(missing_targets)} "
-            f"из {len(expected_targets)}"
+    for slc in slices:
+        slice_payloads = _generate_slice_coverage(
+            schema, slc, path_values, field_schemas,
+            seen_payloads, covered_targets, compact,
         )
-        for path, value_json in sorted(missing_targets)[:10]: # Для каждого не покрытого целевого значения
-            reason = next(
-                (r for p, v, r in failed_targets if p == path and json.dumps(v, sort_keys=True) == value_json),
-                "дубликат или не сгенерировано",
+        payloads.extend(slice_payloads)
+        logger.debug(f"Slice {slc.label}: +{len(slice_payloads)} пейлоадов")
+
+    expected_targets: set = set()
+    for path, values in path_values.items():
+        if _is_mirror_delete_path(path, all_paths):
+            continue
+        limited = _limit_values_for_compact(values, field_schemas[path], compact)
+        for value in limited:
+            expected_targets.add(_coverage_target_key(path, value))
+
+    for slc in slices:
+        if not slc.full_coverage and slc.rule_key:
+            key = _coverage_target_key(f"__slice__.{slc.label}", "minimal")
+            expected_targets.add(key)
+
+    reportable_covered = {
+        k for k in covered_targets
+        if not k[0].startswith("__slice__")
+        and not _is_mirror_delete_path(k[0], all_paths)
+    }
+    missing_targets = expected_targets - reportable_covered
+    if missing_targets:
+        real_missing = {t for t in missing_targets if not t[0].startswith("__slice__")}
+        if real_missing:
+            logger.warning(
+                f"Не покрыто целевых значений: {len(real_missing)} "
+                f"из {len(expected_targets)}"
             )
-            logger.warning(f"  • {path} = {value_json}: {reason}")
-        if len(missing_targets) > 10:
-            logger.warning(f"  … и ещё {len(missing_targets) - 10}")
+            for path, value_json in sorted(real_missing)[:10]:
+                logger.warning(f"  • {path} = {value_json}")
+            if len(real_missing) > 10:
+                logger.warning(f"  … и ещё {len(real_missing) - 10}")
+
+    for slc in slices:
+        if not slc.full_coverage and slc.rule_key:
+            covered_targets.add(_coverage_target_key(f"__slice__.{slc.label}", "minimal"))
 
     logger.info(
         f"Покрытие значений: {len(payloads)} пейлоадов, "
-        f"целей {len(covered_targets)}/{len(expected_targets)}"
-        + (f", пропущено попыток: {skipped}" if skipped else "")
+        f"целей {len(reportable_covered)}/{len(expected_targets)}"
     )
     return payloads
 
@@ -971,6 +945,319 @@ def extract_all_fields(schema):
                 if isinstance(item, dict):
                     fields.update(extract_all_fields(item))
     return fields
+
+
+# =============================================================================
+# ПОКРЫТИЕ ПО ВЕТКАМ oneOf (action × rule type, без дубля add/delete)
+# =============================================================================
+_ACTION_VERBS = ("add", "delete", "modify", "clear")
+
+
+@dataclass(frozen=True)
+class CoverageSlice:
+    label: str
+    verb: str
+    rule_key: str | None
+    full_coverage: bool
+
+
+def _discover_rule_branch_keys(rule_schema: dict) -> list[str]:
+    """Ключи взаимоисключающих rule-веток (dpi, protocol, …)."""
+    if not isinstance(rule_schema, dict):
+        return []
+    keys: set[str] = set()
+    for branch in _iter_schema_branches(rule_schema):
+        for item in branch.get("anyOf", []):
+            if not isinstance(item, dict):
+                continue
+            req = item.get("required") or []
+            if req:
+                keys.add(req[0])
+        if branch.get("properties"):
+            keys.update(branch["properties"].keys())
+        for req in branch.get("required", []):
+            keys.add(req)
+    return sorted(k for k in keys if k not in ("not", "rule"))
+
+
+def _discover_coverage_slices(schema: dict) -> list[CoverageSlice]:
+    action_schema = schema.get("properties", {}).get("action")
+    if not isinstance(action_schema, dict):
+        return []
+    action_branches = list(_iter_schema_branches(action_schema))
+    if not action_branches:
+        return []
+
+    slices: list[CoverageSlice] = []
+    seen: set[str] = set()
+
+    for action_branch in action_branches:
+        verb = action_branch.get("title")
+        if not verb or verb not in action_branch.get("properties", {}):
+            verb = next(
+                (v for v in _ACTION_VERBS if v in action_branch.get("properties", {})),
+                None,
+            )
+        if not verb:
+            continue
+
+        verb_obj = action_branch["properties"][verb]
+        rule_schema = verb_obj.get("properties", {}).get("rule")
+        rule_keys = _discover_rule_branch_keys(rule_schema) if rule_schema else []
+
+        if not rule_keys:
+            label = f"action.{verb}"
+            if label not in seen:
+                seen.add(label)
+                slices.append(CoverageSlice(label, verb, None, True))
+            continue
+
+        shared_label = f"action.{verb}/_shared"
+        if shared_label not in seen:
+            seen.add(shared_label)
+            slices.append(CoverageSlice(shared_label, verb, None, verb == "add"))
+
+        for rule_key in rule_keys:
+            label = f"action.{verb}/{rule_key}"
+            if label in seen:
+                continue
+            seen.add(label)
+            slices.append(CoverageSlice(label, verb, rule_key, verb == "add"))
+
+    return slices
+
+
+def _path_belongs_to_rule_branch(path: str, rule_key: str) -> bool:
+    token = f".rule.{rule_key}"
+    return token + "." in path or path.endswith(token)
+
+
+def _mirror_add_path(delete_path: str) -> str | None:
+    if not delete_path.startswith("action.delete."):
+        return None
+    return "action.add." + delete_path[len("action.delete.") :]
+
+
+def _is_mirror_delete_path(path: str, all_paths: set[str]) -> bool:
+    add_path = _mirror_add_path(path)
+    return bool(add_path and add_path in all_paths)
+
+
+def _path_in_slice(path: str, slc: CoverageSlice) -> bool:
+    prefix = f"action.{slc.verb}"
+    if not path.startswith(prefix):
+        return False
+
+    if slc.rule_key is None:
+        if slc.label.endswith("/_shared"):
+            return ".rule." not in path
+        return True
+
+    if _path_belongs_to_rule_branch(path, slc.rule_key):
+        return True
+    if re.match(rf"^action\.{slc.verb}\.(acl_name|index)$", path):
+        return False
+    if path in (f"action.{slc.verb}", f"action.{slc.verb}.rule"):
+        return slc.full_coverage
+    return False
+
+
+def _slice_anchor_path(
+    slc: CoverageSlice, field_schemas: dict, path_values: dict,
+) -> str | None:
+    if slc.rule_key:
+        candidates = sorted(
+            p for p in path_values
+            if _path_in_slice(p, slc) and _path_belongs_to_rule_branch(p, slc.rule_key)
+        )
+        return candidates[0] if candidates else None
+    for p in sorted(path_values):
+        if _path_in_slice(p, slc):
+            return p
+    return None
+
+
+def _filter_coverage_paths(path_values: dict, field_schemas: dict) -> dict:
+    """Убирает родительские пути, если покрываются дочерними (action → action.add.*)."""
+    all_paths = set(path_values)
+    filtered = {}
+    for path, values in path_values.items():
+        prefix = path + "."
+        if any(p.startswith(prefix) for p in all_paths):
+            continue
+        if path.endswith(".rule") and any(
+            p.startswith(prefix) for p in all_paths
+        ):
+            continue
+        cleaned = [
+            v for v in values
+            if not (isinstance(v, dict) and v == {} and not _is_valid_for_schema({}, field_schemas[path]))
+        ]
+        if cleaned:
+            filtered[path] = cleaned
+    return filtered
+
+
+def _minimal_payload_for_slice(
+    schema: dict, slc: CoverageSlice, field_schemas: dict, path_values: dict,
+) -> dict:
+    if slc.label.endswith("/_shared"):
+        for path in sorted(path_values):
+            match = re.match(rf"^action\.{slc.verb}\.rule\.([^.]+)\.", path)
+            if match:
+                sub = CoverageSlice(
+                    f"{slc.verb}/{match.group(1)}", slc.verb, match.group(1), True,
+                )
+                return _minimal_payload_for_slice(schema, sub, field_schemas, path_values)
+
+    anchor = _slice_anchor_path(slc, field_schemas, path_values)
+    if anchor and path_values.get(anchor):
+        return _build_payload_for_path(schema, anchor, path_values[anchor][0])
+    if slc.rule_key:
+        leaf = next(
+            (
+                p for p in sorted(path_values)
+                if _path_belongs_to_rule_branch(p, slc.rule_key)
+                and p.startswith(f"action.{slc.verb}")
+            ),
+            None,
+        )
+        if leaf and path_values.get(leaf):
+            return _build_payload_for_path(schema, leaf, path_values[leaf][0])
+    return build_minimal_payload(schema)
+
+
+def _limit_values_for_compact(values: list, field_schema: dict, compact: bool) -> list:
+    if not compact or len(values) <= 10:
+        return values
+    if field_schema.get("enum") and len(values) > 10:
+        mid = values[len(values) // 2]
+        return [values[0], mid, values[-1]]
+    return values
+
+
+def _coverage_target_key(path: str, value) -> tuple:
+    return (path, json.dumps(value, sort_keys=True, ensure_ascii=False))
+
+
+def _mark_covered(covered: set, path: str, value, mirror_paths: bool = True) -> None:
+    covered.add(_coverage_target_key(path, value))
+    if mirror_paths:
+        if path.startswith("action.add."):
+            mirror = "action.delete." + path[len("action.add.") :]
+            covered.add(_coverage_target_key(mirror, value))
+        elif path.startswith("action.delete."):
+            mirror = _mirror_add_path(path)
+            if mirror:
+                covered.add(_coverage_target_key(mirror, value))
+
+
+def _generate_slice_coverage(
+    schema: dict,
+    slc: CoverageSlice,
+    path_values: dict,
+    field_schemas: dict,
+    seen_payloads: set,
+    covered_targets: set,
+    compact: bool,
+) -> list:
+    payloads: list = []
+
+    def _add(payload, label="", path=None, value=None, mirror=True):
+        payload = _coerce_payload_to_schema(payload, schema)
+        key = _payload_fingerprint(payload)
+        if key in seen_payloads:
+            if path is not None:
+                _mark_covered(covered_targets, path, value, mirror_paths=mirror)
+            return True
+        valid, reason = _validate_payload(payload, schema)
+        if not valid:
+            logger.debug(f"Пропуск [{slc.label}] ({label}): {reason}")
+            return False
+        seen_payloads.add(key)
+        payloads.append(copy.deepcopy(payload))
+        if path is not None:
+            _mark_covered(covered_targets, path, value, mirror_paths=mirror)
+        return True
+
+    slice_paths = {
+        p: _limit_values_for_compact(v, field_schemas[p], compact)
+        for p, v in path_values.items()
+        if _path_in_slice(p, slc)
+    }
+
+    if not slc.full_coverage:
+        minimal = _minimal_payload_for_slice(schema, slc, field_schemas, path_values)
+        _add(minimal, f"minimal/{slc.label}", mirror=False)
+        return payloads
+
+    minimal = _minimal_payload_for_slice(schema, slc, field_schemas, path_values)
+    _add(minimal, f"minimal/{slc.label}")
+
+    for path, test_values in sorted(slice_paths.items()):
+        for value in test_values:
+            variant = copy.deepcopy(minimal)
+            set_field_test_value(variant, schema, path, value)
+            _add(variant, f"{path}={value!r}", path=path, value=value)
+
+    return payloads
+
+
+def _generate_flat_coverage(
+    schema: dict, path_values: dict, field_schemas: dict, compact: bool,
+) -> list:
+    """Legacy: одно flat-покрытие для простых схем без action oneOf."""
+    minimal_base = build_minimal_payload(schema)
+    payloads: list = []
+    seen: set = set()
+    covered_targets: set = set()
+    skipped = 0
+
+    def _add(payload, label="", path=None, value=None):
+        nonlocal skipped
+        payload = _coerce_payload_to_schema(payload, schema)
+        key = _payload_fingerprint(payload)
+        if key in seen:
+            if path is not None:
+                covered_targets.add(_coverage_target_key(path, value))
+            return True
+        valid, reason = _validate_payload(payload, schema)
+        if not valid:
+            skipped += 1
+            logger.debug(f"Пропуск ({label}): {reason}")
+            return False
+        seen.add(key)
+        payloads.append(copy.deepcopy(payload))
+        if path is not None:
+            covered_targets.add(_coverage_target_key(path, value))
+        return True
+
+    _add(minimal_base, "minimal")
+
+    for path, test_values in sorted(path_values.items()):
+        limited = _limit_values_for_compact(test_values, field_schemas[path], compact)
+        for value in limited:
+            variant = copy.deepcopy(minimal_base)
+            set_field_test_value(variant, schema, path, value)
+            _add(variant, f"{path}={value!r}", path=path, value=value)
+
+    expected_targets = {
+        _coverage_target_key(path, value)
+        for path, values in path_values.items()
+        for value in _limit_values_for_compact(values, field_schemas[path], compact)
+    }
+    missing_targets = expected_targets - covered_targets
+    if missing_targets:
+        logger.warning(
+            f"Не покрыто целевых значений: {len(missing_targets)} "
+            f"из {len(expected_targets)}"
+        )
+    logger.info(
+        f"Покрытие значений: {len(payloads)} пейлоадов, "
+        f"целей {len(covered_targets)}/{len(expected_targets)}"
+        + (f", пропущено попыток: {skipped}" if skipped else "")
+    )
+    return payloads
 
 
 # =============================================================================
@@ -1020,9 +1307,6 @@ def scan_payload_for_dependencies(payload, dep_map, path=""):
 # =============================================================================
 # ACTION-AWARE LIFECYCLE (main_test action → setup/teardown)
 # =============================================================================
-_ACTION_VERBS = ("add", "delete", "modify", "clear")
-
-
 def _extract_main_action(payload: dict) -> tuple[str | None, dict]:
     """
     Извлекает глагол action из main_test payload.
@@ -1043,7 +1327,11 @@ def _extract_main_action(payload: dict) -> tuple[str | None, dict]:
             if verb not in action:
                 continue
             data = action[verb]
-            return verb, data if isinstance(data, dict) else {}
+            if isinstance(data, dict):
+                return verb, data
+            if data is not None and not isinstance(data, list):
+                return verb, {verb: data}
+            return verb, {}
 
     return None, {}
 
@@ -1127,6 +1415,203 @@ def _apply_field_lifecycle(scenario, target_endpoint, field, value, config,
         _append_lifecycle_teardown(
             scenario, field, value, lifecycle, variables,
         )
+
+
+_SCALAR_ACTION_TYPES = ("integer", "number", "string")
+
+
+def _find_id_field_for_scalar_delete(add_schema: dict, delete_scalar_schema: dict) -> str | None:
+    """ID-поле в action.add, тип которого совпадает со скалярным action.delete."""
+    delete_type = _resolve_schema_type(delete_scalar_schema)
+    if delete_type not in _SCALAR_ACTION_TYPES:
+        return None
+
+    branches = (
+        list(_iter_schema_branches(add_schema))
+        if _schema_has_composition(add_schema)
+        else [add_schema]
+    )
+    candidates: list[tuple[int, str]] = []
+    seen: set[str] = set()
+
+    for branch in branches:
+        if _resolve_schema_type(branch) != "object":
+            continue
+        required = set(branch.get("required", []))
+        for name, prop_schema in branch.get("properties", {}).items():
+            if name in seen:
+                continue
+            if _resolve_schema_type(prop_schema) != delete_type:
+                continue
+            if _schema_has_composition(prop_schema):
+                continue
+            score = 10 if name in required else 0
+            lower = name.lower()
+            if lower.endswith("_name") or lower.endswith("_id") or lower in ("id", "name"):
+                score += 5
+            candidates.append((score, name))
+            seen.add(name)
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: -item[0])
+    return candidates[0][1]
+
+
+def detect_scalar_delete_action_pattern(schema: dict) -> dict | None:
+    """
+    Паттерн: action.add — object, action.delete — скаляр (ID ресурса).
+    Возвращает метаданные для авто setup/teardown на том же эндпоинте.
+    """
+    action_schema = schema.get("properties", {}).get("action")
+    if not isinstance(action_schema, dict):
+        return None
+
+    branches = list(_iter_schema_branches(action_schema))
+    if not branches and action_schema.get("properties"):
+        branches = [action_schema]
+
+    delete_inner = None
+    add_inner = None
+
+    for branch in branches:
+        props = branch.get("properties", {})
+        if "delete" in props:
+            ds = props["delete"]
+            if (
+                _resolve_schema_type(ds) in _SCALAR_ACTION_TYPES
+                and not _schema_has_composition(ds)
+            ):
+                delete_inner = ds
+        if "add" in props:
+            ad = props["add"]
+            if _resolve_schema_type(ad) == "object" or _schema_has_composition(ad):
+                add_inner = ad
+
+    if delete_inner is None or add_inner is None:
+        return None
+
+    id_field = _find_id_field_for_scalar_delete(add_inner, delete_inner)
+    if not id_field:
+        return None
+
+    return {
+        "id_field": id_field,
+        "add_inner_schema": add_inner,
+    }
+
+
+def _scalar_delete_value_from_payload(payload: dict) -> object | None:
+    action = payload.get("action")
+    if not isinstance(action, dict) or "delete" not in action:
+        return None
+    value = action["delete"]
+    if isinstance(value, (dict, list)):
+        return None
+    return value
+
+
+def _id_value_from_add_payload(payload: dict, id_field: str) -> object | None:
+    action = payload.get("action")
+    if not isinstance(action, dict) or "add" not in action:
+        return None
+    add_data = action["add"]
+    if not isinstance(add_data, dict):
+        return None
+    return add_data.get(id_field)
+
+
+def _build_auto_add_setup_payload(add_inner_schema: dict, id_field: str, id_value) -> dict:
+    branch = _find_oneof_branch_for_field(add_inner_schema, id_field, id_value)
+    if branch is None:
+        branch = (
+            next(_iter_schema_branches(add_inner_schema), None)
+            if _schema_has_composition(add_inner_schema)
+            else add_inner_schema
+        )
+    add_obj = _minimal_object_composed(branch)
+    add_obj[id_field] = id_value
+    add_obj = _coerce_payload_to_schema(add_obj, branch)
+    return {"action": {"add": add_obj}}
+
+
+def _field_mapping_covers_scalar_delete(
+    deps: dict, pattern: dict, target_endpoint: str, main_action: str | None,
+) -> bool:
+    """field_mappings на том же эндпоинте уже покрывает lifecycle для ID-поля."""
+    id_field = pattern["id_field"]
+    for dep_info in deps.values():
+        if dep_info["field"] != id_field:
+            continue
+        config = dep_info["config"]
+        if _is_prerequisite_field(config, target_endpoint):
+            continue
+        phases = _field_lifecycle_phases(main_action, config, target_endpoint)
+        if main_action == "add" and "teardown" in phases:
+            return True
+        if main_action == "delete" and "setup" in phases:
+            return True
+    return False
+
+
+def _apply_auto_scalar_delete_lifecycle(
+    scenario, target_endpoint, main_action, payload, pattern, endpoint_rules,
+    variables, deps,
+):
+    """Авто setup/teardown: add→delete(id), delete(id)→minimal add."""
+    if not pattern or not main_action:
+        return
+
+    if _field_mapping_covers_scalar_delete(deps, pattern, target_endpoint, main_action):
+        logger.debug(
+            f"Auto lifecycle пропущен: field_mappings покрывает {pattern['id_field']}"
+        )
+        return
+
+    rules = (
+        endpoint_rules.get(target_endpoint)
+        or endpoint_rules.get(target_endpoint.rstrip("/"))
+        or {}
+    )
+    action_rules = rules.get(main_action, {})
+    id_field = pattern["id_field"]
+    add_inner_schema = pattern["add_inner_schema"]
+
+    if main_action == "add":
+        if _as_lifecycle_list(action_rules.get("teardown")):
+            return
+        id_value = _id_value_from_add_payload(payload, id_field)
+        if id_value is None:
+            return
+        scenario["teardown"].append({
+            "endpoint": target_endpoint,
+            "method": "POST",
+            "payload": {"action": {"delete": id_value}},
+            "expected_status": 200,
+            "note": f"Auto-teardown: delete {id_field}={id_value}",
+        })
+        variables[id_field] = id_value
+        logger.debug(f"Auto-teardown scalar delete: {id_field}={id_value}")
+
+    elif main_action == "delete":
+        if _as_lifecycle_list(action_rules.get("setup")):
+            return
+        delete_value = _scalar_delete_value_from_payload(payload)
+        if delete_value is None:
+            return
+        setup_payload = _build_auto_add_setup_payload(
+            add_inner_schema, id_field, delete_value,
+        )
+        scenario["setup"].append({
+            "endpoint": target_endpoint,
+            "method": "POST",
+            "payload": setup_payload,
+            "expected_status": 200,
+            "note": f"Auto-setup: add {id_field}={delete_value}",
+        })
+        variables["delete"] = delete_value
+        variables[id_field] = delete_value
+        logger.debug(f"Auto-setup before scalar delete: {id_field}={delete_value}")
 
 
 def _apply_endpoint_action_lifecycle(scenario, target_endpoint, main_action,
@@ -1593,7 +2078,10 @@ def _apply_interface_lifecycle(scenario, target_endpoint, field_name, field_valu
 # =============================================================================
 # ФОРМИРОВАНИЕ ТЕСТ-СЦЕНАРИЕВ (С INTERFACE_RULES + SELF-SKIP ДЛЯ SETUP)
 # =============================================================================
-def build_test_scenarios(target_endpoint, method, raw_payloads, dependencies_config):
+def build_test_scenarios(
+    target_endpoint, method, raw_payloads, dependencies_config,
+    request_schema: dict | None = None,
+):
     logger.info(f"Формирую тест-сценарии для {len(raw_payloads)} пейлоадов...")
     os.makedirs("tests", exist_ok=True)
     safe_name = target_endpoint.strip("/").replace("/", "_") + f"_{method}.json"
@@ -1602,6 +2090,15 @@ def build_test_scenarios(target_endpoint, method, raw_payloads, dependencies_con
     dep_map = dependencies_config.get("field_mappings", dependencies_config)
     iface_rules = dependencies_config.get("interface_rules", {})
     endpoint_rules = dependencies_config.get("endpoint_rules", {})
+    auto_scalar_delete = (
+        detect_scalar_delete_action_pattern(request_schema)
+        if request_schema else None
+    )
+    if auto_scalar_delete:
+        logger.info(
+            "Авто lifecycle (scalar delete): id_field="
+            f"{auto_scalar_delete['id_field']}"
+        )
     scenarios = []
 
     for idx, payload in enumerate(raw_payloads, 1):
@@ -1647,6 +2144,14 @@ def build_test_scenarios(target_endpoint, method, raw_payloads, dependencies_con
         _apply_endpoint_action_lifecycle(
             scenario, target_endpoint, main_action, action_data,
             endpoint_rules, variables,
+        )
+
+        # =====================================================================
+        # АВТО LIFECYCLE: action.add (object) + action.delete (scalar)
+        # =====================================================================
+        _apply_auto_scalar_delete_lifecycle(
+            scenario, target_endpoint, main_action, payload,
+            auto_scalar_delete, endpoint_rules, variables, deps,
         )
 
         # =====================================================================
@@ -1719,6 +2224,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--verbose",
         action="store_true",
         help="Debug-режим логирования (test.log)",
+    )
+    parser.add_argument(
+        "-c",
+        "--compact-coverage",
+        action="store_true",
+        help="Компактное покрытие: большие enum (>10) → 3 значения вместо всех",
     )
     return parser.parse_args(argv)
 
@@ -1817,7 +2328,9 @@ def main(argv: list[str] | None = None):
             faker = JSF(clean_schema)
 
             # 1) Целенаправленное покрытие значений (enum, boolean, границы чисел)
-            final_payloads = generate_value_coverage_payloads(clean_schema) # Генерируем пейлоады для покрытия значений
+            final_payloads = generate_value_coverage_payloads(
+                clean_schema, compact=args.compact_coverage,
+            )
             covered_fields = set() # Создаем множество для полей, которые покрыты
             for payload in final_payloads:
                 covered_fields.update(get_payload_fields(payload)) # Добавляем поля, которые покрыты в множество
@@ -1852,7 +2365,10 @@ def main(argv: list[str] | None = None):
             logger.info(f"Итого уникальных пейлоадов: {len(final_payloads)}")
 
             # Строим json тест
-            build_test_scenarios(target_endpoint, method, final_payloads, dependencies) # Строим json тест
+            build_test_scenarios(
+                target_endpoint, method, final_payloads, dependencies,
+                request_schema=clean_schema,
+            )
             
             logger.info(f"Генерация завершена. Общее время: {time.time() - start_main:.2f} сек.") # Логируем общее время генерации
             
