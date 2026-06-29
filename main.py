@@ -4,6 +4,7 @@ import re
 import copy
 import time
 import logging
+import argparse
 from pathlib import Path
 from jsf import JSF
 from resolve_scheme import ResolveScheme
@@ -11,17 +12,19 @@ from resolve_scheme import ResolveScheme
 # =============================================================================
 # ГЛОБАЛЬНАЯ НАСТРОЙКА ЛОГИРОВАНИЯ
 # =============================================================================
-logging.basicConfig(
-    filename="test.log",
-    filemode="w",
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)-7s | %(name)-15s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"  # Дата + время
-)
 logger = logging.getLogger("MAIN")
 
-# Для полной отладки раскомментируйте:
-logging.getLogger().setLevel(logging.DEBUG)
+
+def configure_logging(debug: bool = False) -> None:
+    level = logging.DEBUG if debug else logging.INFO
+    logging.basicConfig(
+        filename="test.log",
+        filemode="w",
+        level=level,
+        format="%(asctime)s | %(levelname)-7s | %(name)-15s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        force=True,
+    )
 
 
 # =============================================================================
@@ -1698,9 +1701,61 @@ def build_test_scenarios(target_endpoint, method, raw_payloads, dependencies_con
 
 
 # =============================================================================
+# CLI
+# =============================================================================
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Генератор REST API тестов из OpenAPI-схемы",
+    )
+    parser.add_argument(
+        "-e",
+        "--endpoint",
+        nargs="+",
+        metavar="PATH",
+        help="Эндпоинт или список эндпоинтов (POST). Без -e — все POST из openapi.json",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Debug-режим логирования (test.log)",
+    )
+    return parser.parse_args(argv)
+
+
+def _normalize_endpoint(path: str) -> str:
+    return path if path.startswith("/") else f"/{path}"
+
+
+def discover_post_endpoints(openapi_data: dict) -> list[str]:
+    return sorted(
+        path
+        for path, methods in openapi_data.get("paths", {}).items()
+        if isinstance(methods, dict) and "post" in methods
+    )
+
+
+def resolve_target_endpoints(requested: list[str] | None, all_endpoints: list[str]) -> list[str]:
+    if not requested:
+        return all_endpoints
+
+    normalized = [_normalize_endpoint(ep) for ep in requested]
+    known = set(all_endpoints)
+    invalid = [ep for ep in normalized if ep not in known]
+    if invalid:
+        raise SystemExit(
+            f"Эндпоинты не найдены в openapi.json (POST): {', '.join(invalid)}"
+        )
+    return normalized
+
+
+# =============================================================================
 # MAIN
 # =============================================================================
-def main():
+def main(argv: list[str] | None = None):
+    args = parse_args(argv)
+    configure_logging(debug=args.verbose)
+
     logger.info("Запуск генератора тестов...")
     start_main = time.time()
     
@@ -1720,20 +1775,15 @@ def main():
     else:
         logger.info("Инвентарь интерфейсов не задан (.env / allowed в dependencies.json)")
 
-    # Ендпоинт для теста
     with open("openapi.json", "r", encoding="utf-8") as file:
         data = json.load(file)
 
-    post_endpoints = sorted(
-        path
-        for path, methods in data.get("paths", {}).items()
-        if isinstance(methods, dict) and "post" in methods
-    )
-    endpoints = []
-    for endpoint in post_endpoints:
-        endpoints.append(endpoint)
-
-    endpoints = ["/acl/filter/filter_ipv4", "/vrf", "/ipsla", "/ipsla/config", "/interfaces/tunnel/add"]
+    post_endpoints = discover_post_endpoints(data)
+    endpoints = resolve_target_endpoints(args.endpoint, post_endpoints)
+    if args.endpoint:
+        logger.info(f"Выбрано эндпоинтов: {len(endpoints)}")
+    else:
+        logger.info(f"Все POST-эндпоинты из openapi.json: {len(endpoints)}")
     
     for target_endpoint in endpoints:
         # Метод ендпоинта

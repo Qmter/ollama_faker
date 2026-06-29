@@ -15,6 +15,22 @@ cp .env.example .env
 python main.py
 ```
 
+С аргументами:
+
+```bash
+python main.py                              # все POST-эндпоинты из openapi.json
+python main.py -e /vrf                      # один эндпоинт
+python main.py -e /vrf /ipsla /ipsla/config # несколько эндпоинтов
+python main.py -v                           # debug-логирование в test.log
+python main.py -e /vrf -v                   # эндпоинт + debug
+```
+
+| Аргумент | Описание |
+|----------|----------|
+| `-e PATH [PATH ...]` | Эндпоинт или список эндпоинтов (POST) |
+| `-v` | Debug-режим логирования |
+| без аргументов | Генерация для всех POST из `openapi.json` |
+
 Результат:
 - `tests/<endpoint>_<method>.json` — готовые тест-сценарии
 - `test.log` — подробный лог генерации (покрытие полей/значений, пропуски валидации)
@@ -76,17 +92,13 @@ tests/*.json
 
 ## Настройка эндпоинтов
 
-Список генерируемых эндпоинтов задаётся в `main.py`:
+Эндпоинты задаются через аргумент `-e` при запуске. Без него обрабатываются **все POST** из `openapi.json`:
 
-```python
-target_endpoints = [
-    "/interfaces/ethernet/capability",
-    "/vrf",
-    # ...
-]
+```bash
+python main.py -e /interfaces/ethernet/capability /vrf
 ```
 
-Добавьте путь из `openapi.json` и перезапустите `python main.py`.
+Список доступных путей можно посмотреть в `openapi.json` или через `l.py`.
 
 ## dependencies.json — полная документация
 
@@ -660,11 +672,7 @@ DEVICE_VLAN_IFNAMES=vlan100,vlan200
 ## Логирование
 
 - Файл: `test.log` (перезаписывается при каждом запуске)
-- Уровень INFO по умолчанию
-- Для отладки в `main.py` раскомментируйте:
-  ```python
-  logging.getLogger().setLevel(logging.DEBUG)
-  ```
+- Уровень INFO по умолчанию; `-v` включает DEBUG
 
 Полезные сообщения:
 - `Покрытие значений: N пейлоадов, целей X/Y` — покрытие enum/boolean/границ
@@ -688,8 +696,7 @@ DEVICE_VLAN_IFNAMES=vlan100,vlan200
 
 ### Добавить новый эндпоинт
 1. Проверить путь в `openapi.json`
-2. Добавить в `target_endpoints` в `main.py`
-3. `python main.py`
+2. `python main.py -e /новый/путь`
 
 ### Тест использует vrf/acl, которых нет на устройстве
 Добавить поле в `field_mappings` — см. [field_mappings](#field_mappings).
