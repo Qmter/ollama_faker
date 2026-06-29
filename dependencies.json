@@ -3,6 +3,7 @@
     "vrf_name": {
       "setup": {
         "endpoint": "/vrf",
+        "method": "POST",
         "payload": {
           "action": "add",
           "vrf_name": "{{vrf_name}}"
@@ -12,6 +13,7 @@
       },
       "teardown": {
         "endpoint": "/vrf",
+        "method": "POST",
         "payload": {
           "action": "delete",
           "vrf_name": "{{vrf_name}}"
@@ -23,6 +25,7 @@
     "vrf": {
       "setup": {
         "endpoint": "/vrf",
+        "method": "POST",
         "payload": {
           "action": "add",
           "vrf": "{{vrf}}"
@@ -32,6 +35,7 @@
       },
       "teardown": {
         "endpoint": "/vrf",
+        "method": "POST",
         "payload": {
           "action": "delete",
           "vrf": "{{vrf}}"
@@ -43,6 +47,7 @@
     "acl_name": {
       "setup": {
         "endpoint": "/acl/acl_ipv4",
+        "method": "POST",
         "payload": {
             "action": {
               "add": {
@@ -60,16 +65,138 @@
       },
       "teardown": {
         "endpoint": "/acl/acl_ipv4",
+        "method": "POST",
         "payload": {
           "action": {
             "delete": {
               "acl_name": "{{acl_name}}"
             }
           }
-      },
+        },
         "note": "Cleanup created acl_name"
       },
       "optional": true
+    }
+  },
+  "endpoint_rules": {
+    "/acl/filter/filter_ipv4": {
+      "bind_fields": ["vrf", "chain", "acl_name"],
+      "add": {
+        "teardown": {
+          "endpoint": "/acl/filter/filter_ipv4",
+          "method": "POST",
+          "payload": {
+            "action": {
+              "delete": {
+                "vrf": "{{vrf}}",
+                "chain": "{{chain}}",
+                "acl_name": "{{acl_name}}"
+              }
+            }
+          },
+          "note": "Cleanup filter after add test"
+        }
+      },
+      "delete": {
+        "setup": [
+          {
+            "endpoint": "/acl/acl_ipv4",
+            "method": "POST",
+            "payload": {
+              "action": {
+                "add": {
+                  "acl_name": "test_acl_name",
+                  "rule": {
+                    "dpi": {
+                      "dpi_protocol": "sina(weibo)"
+                    }
+                  }
+                }
+              }
+            },
+            "note": "Create acl before delete test"
+          },
+          {
+          "endpoint": "/acl/filter/filter_ipv4",
+          "method": "POST",
+          "payload": {
+            "action": {
+              "add": {
+                "vrf": "{{vrf}}",
+                "chain": "{{chain}}",
+                "filter": {
+                  "acl_name": "test_acl_name",
+                  "action": "permit"
+                }
+              }
+            }
+          },
+          "note": "Create filter before delete test"
+        }
+      ]
+      },
+      "modify": {
+        "setup": [
+          {
+            "endpoint": "/acl/acl_ipv4",
+            "method": "POST",
+            "payload": {
+              "action": {
+                "add": {
+                  "acl_name": "test_acl_name",
+                  "dpi": {
+                    "dpi_protocol": "sina(weibo)"
+                  }
+                }
+              }
+            }
+          },
+          {
+          "endpoint": "/acl/filter/filter_ipv4",
+          "method": "POST",
+          "payload": {
+            "action": {
+              "add": {
+                "vrf": "{{vrf}}",
+                "chain": "{{chain}}",
+                "filter": {
+                  "acl_name": "test_acl_name",
+                  "action": "permit"
+                }
+              }
+            }
+          },
+          "note": "Create filter before modify test"
+        }
+      ],
+        "teardown": [
+          {
+            "endpoint": "/acl/filter/filter_ipv4",
+            "method": "POST",
+            "payload": {
+              "action": {
+                "delete": {
+                  "vrf": "{{vrf}}",
+                  "chain": "{{chain}}"
+                }
+              }
+            },
+            "note": "Cleanup filter after modify test"
+          },
+          {
+            "endpoint": "/acl/acl_ipv4",
+            "method": "POST",
+            "payload": {
+              "action": {
+                "delete": {
+                  "acl_name": "test_acl_name"
+                }
+              }
+            },
+            "note": "Cleanup acl after modify test"
+          }
+      ]
+      }
     }
   },
   "interface_rules": {
@@ -86,6 +213,7 @@
           "env": "DEVICE_ETH_IFNAMES",
           "setup": {
             "endpoint": "/interfaces/shutdown",
+            "method": "POST",
             "payload": {
               "ifname": "{{ifname}}",
               "adm_state": true
@@ -94,6 +222,7 @@
           },
           "teardown": [{
             "endpoint": "/interfaces/common/reset_interface",
+            "method": "POST",
             "payload": {
               "ifname": "{{ifname}}"
             },
@@ -106,6 +235,7 @@
           "env": "DEVICE_SWITCHPORT_IFNAMES",
           "teardown": {
             "endpoint": "/interfaces/common/reset_interface",
+            "method": "POST",
             "payload": {
               "ifname": "{{ifname}}"
             },
@@ -137,6 +267,7 @@
           "prefix": "tunnel",
           "setup": {
             "endpoint": "/interfaces/tunnel/add",
+            "method": "POST",
             "payload": {
               "ifname": "{{ifname}}",
               "settings": {
@@ -149,18 +280,11 @@
           "teardown": [
             {
             "endpoint": "/interfaces/tunnel/delete",
+            "method": "POST",
             "payload": {
               "ifname": "{{ifname}}"
             },
             "note": "Cleanup created ifname_tunnel"
-          },
-          {
-            "endpoint": "/interfaces/shutdown",
-            "payload": {
-              "ifname": "{{ifname}}",
-              "adm_state": false
-            },
-            "note": "Reset physical ethernet to defaults"
           }
           ]
         }

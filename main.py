@@ -1015,6 +1015,146 @@ def scan_payload_for_dependencies(payload, dep_map, path=""):
 
 
 # =============================================================================
+# ACTION-AWARE LIFECYCLE (main_test action → setup/teardown)
+# =============================================================================
+_ACTION_VERBS = ("add", "delete", "modify", "clear")
+
+
+def _extract_main_action(payload: dict) -> tuple[str | None, dict]:
+    """
+    Извлекает глагол action из main_test payload.
+    Поддерживает: "action": "add" и "action": {"add": {...}}.
+    """
+    if not isinstance(payload, dict):
+        return None, {}
+
+    action = payload.get("action")
+    if isinstance(action, str):
+        return action.lower(), {
+            k: v for k, v in payload.items()
+            if k != "action" and not isinstance(v, (dict, list))
+        }
+
+    if isinstance(action, dict):
+        for verb in _ACTION_VERBS:
+            if verb not in action:
+                continue
+            data = action[verb]
+            return verb, data if isinstance(data, dict) else {}
+
+    return None, {}
+
+
+def _collect_bind_vars(obj, into: dict | None = None) -> dict:
+    """Собирает скалярные поля из action-блока для {{placeholder}}."""
+    into = into if into is not None else {}
+    if isinstance(obj, dict):
+        for key, val in obj.items():
+            if isinstance(val, dict):
+                _collect_bind_vars(val, into)
+            elif isinstance(val, list):
+                for item in val:
+                    _collect_bind_vars(item, into)
+            elif val is not None:
+                into[key] = val
+    return into
+
+
+def _lifecycle_endpoint_from_config(config: dict, phase: str) -> str | None:
+    """Endpoint из setup/teardown или legacy create/delete."""
+    alt = "create" if phase == "setup" else "delete"
+    step = config.get(phase) or config.get(alt)
+    if isinstance(step, str):
+        return step
+    if isinstance(step, dict):
+        return step.get("endpoint")
+    if isinstance(step, list) and step:
+        first = step[0]
+        return first.get("endpoint") if isinstance(first, dict) else None
+    return None
+
+
+def _is_prerequisite_field(config: dict, target_endpoint: str) -> bool:
+    """Зависимость на другом эндпоинте (vrf/acl для filter), не ресурс main_test."""
+    target = target_endpoint.rstrip("/")
+    setup_ep = _lifecycle_endpoint_from_config(config, "setup")
+    teardown_ep = _lifecycle_endpoint_from_config(config, "teardown")
+    for ep in (setup_ep, teardown_ep):
+        if ep and ep.rstrip("/") != target:
+            return True
+    return False
+
+
+def _field_lifecycle_phases(main_action: str | None, config: dict, target_endpoint: str) -> set:
+    """
+    Какие фазы lifecycle нужны для field_mapping с учётом action в main_test.
+    prerequisite → setup + teardown всегда.
+    ресурс того же эндпоинта: add→teardown, delete→setup, modify→оба.
+    """
+    if _is_prerequisite_field(config, target_endpoint):
+        return {"setup", "teardown"}
+
+    if main_action == "add":
+        return {"teardown"}
+    if main_action == "delete":
+        return {"setup"}
+    if main_action == "modify":
+        return {"setup", "teardown"}
+    return {"setup", "teardown"}
+
+
+def _apply_field_lifecycle(scenario, target_endpoint, field, value, config,
+                           main_action, variables, phases: set):
+    """Setup/teardown для одного field_mapping с учётом phases."""
+    if config.get("optional") and value in (None, "", []):
+        return
+
+    lifecycle = _resolve_field_lifecycle(config, field)
+    var_name = f"created_{field}"
+
+    if "setup" in phases:
+        _append_lifecycle_setup(
+            scenario, target_endpoint, field, value,
+            lifecycle, variables, var_name, main_action=main_action,
+        )
+    else:
+        variables.setdefault(var_name, value)
+
+    if "teardown" in phases:
+        _append_lifecycle_teardown(
+            scenario, field, value, lifecycle, variables,
+        )
+
+
+def _apply_endpoint_action_lifecycle(scenario, target_endpoint, main_action,
+                                     action_data, endpoint_rules, variables):
+    """Setup/teardown самого эндпоинта из endpoint_rules по action main_test."""
+    if not main_action:
+        return
+
+    rules = endpoint_rules.get(target_endpoint) or endpoint_rules.get(target_endpoint.rstrip("/"))
+    if not rules:
+        return
+
+    action_rules = rules.get(main_action, {})
+    bind_fields = rules.get("bind_fields", [])
+    bind_vars = _collect_bind_vars(action_data)
+    if bind_fields:
+        bind_vars = {k: bind_vars[k] for k in bind_fields if k in bind_vars}
+    variables.update(bind_vars)
+
+    for phase in ("setup", "teardown"):
+        for step_def in _as_lifecycle_list(action_rules.get(phase)):
+            if not isinstance(step_def, dict) or "endpoint" not in step_def:
+                continue
+            step = copy.deepcopy(step_def)
+            if "note" not in step:
+                step["note"] = f"{phase}: action {main_action} on {target_endpoint}"
+            _append_custom_lifecycle_step(scenario, phase, step, variables)
+            logger.debug(f"Endpoint {phase} ({main_action}): {step['endpoint']}")
+
+
+# =============================================================================
 # ПОДСТАНОВКА ПЕРЕМЕННЫХ В ОБЪЕКТЕ (рекурсивно)
 # =============================================================================
 def _replace_placeholders(obj, variables):
@@ -1165,21 +1305,24 @@ def _iter_teardown_steps(lifecycle, field_name, field_value):
 
 
 def _append_lifecycle_setup(scenario, target_endpoint, field_name, field_value,
-                            lifecycle, variables, var_name):
+                            lifecycle, variables, var_name, main_action=None):
     """Setup: один или несколько шагов (setup / create)."""
     steps = list(_iter_setup_steps(lifecycle, field_name, field_value))
-    if not steps: # Если нет шагов
-        return # Возвращаем пустой генератор
+    if not steps:
+        return
 
-    extract_assigned = False # Создаем переменную для проверки, есть ли extract_to_variable
-    vars_ = _lifecycle_vars(field_name, field_value, variables) # Создаем переменную для проверки, есть ли extract_to_variable
+    extract_assigned = False
+    vars_ = _lifecycle_vars(field_name, field_value, variables)
 
-    for step_def in steps: # Для каждого шага
-        endpoint = step_def["endpoint"] # Получаем endpoint
-        is_self = endpoint.rstrip("/") == target_endpoint.rstrip("/") # Проверяем, является ли endpoint самой целью
-        if is_self: # Если endpoint самой цели
-            logger.debug(f"Self-skip setup: тестируем {target_endpoint}, пропускаю {endpoint}") # Логируем пропуск
-            continue # Пропускаем шаг
+    for step_def in steps:
+        endpoint = step_def["endpoint"]
+        is_self = endpoint.rstrip("/") == target_endpoint.rstrip("/")
+        if is_self and main_action != "delete":
+            logger.debug(
+                f"Self-skip setup: тестируем {target_endpoint}, "
+                f"пропускаю {endpoint}"
+            )
+            continue
 
         step = copy.deepcopy(step_def) # Копируем шаг
         if "extract_to_variable" in step:
@@ -1415,7 +1558,8 @@ def _interface_var_name(ifname: str) -> str:
 
 
 def _apply_interface_lifecycle(scenario, target_endpoint, field_name, field_value,
-                               iface_rules, variables, handled_ifnames: set):
+                               iface_rules, variables, handled_ifnames: set,
+                               main_action=None):
     """Setup/teardown для одного ifname (на любом уровне вложенности пейлоада)."""
     if field_value in handled_ifnames:
         return
@@ -1432,7 +1576,7 @@ def _apply_interface_lifecycle(scenario, target_endpoint, field_name, field_valu
     if lifecycle.get("setup") or lifecycle.get("create"):
         _append_lifecycle_setup(
             scenario, target_endpoint, field_name, field_value,
-            lifecycle, variables, var_name,
+            lifecycle, variables, var_name, main_action=main_action,
         )
 
     if lifecycle.get("teardown") or lifecycle.get("delete"):
@@ -1454,6 +1598,7 @@ def build_test_scenarios(target_endpoint, method, raw_payloads, dependencies_con
 
     dep_map = dependencies_config.get("field_mappings", dependencies_config)
     iface_rules = dependencies_config.get("interface_rules", {})
+    endpoint_rules = dependencies_config.get("endpoint_rules", {})
     scenarios = []
 
     for idx, payload in enumerate(raw_payloads, 1):
@@ -1472,28 +1617,34 @@ def build_test_scenarios(target_endpoint, method, raw_payloads, dependencies_con
             "teardown": []
         }
 
+        main_action, action_data = _extract_main_action(payload)
+        if main_action:
+            logger.debug(f"main_test action: {main_action}")
+            _collect_bind_vars(action_data, variables)
+
         deps = scan_payload_for_dependencies(payload, dep_map)
-        
+
         # =====================================================================
-        # СТАНДАРТНАЯ ОБРАБОТКА (vrf_name, acl_name и т.д. из field_mappings)
+        # FIELD_MAPPINGS: setup/teardown по action в main_test
         # =====================================================================
         for dep_path, dep_info in deps.items():
-            field, value, config = dep_info["field"], dep_info["value"], dep_info["config"]
-
-            if config.get("optional") and value in [None, "", []]:
-                logger.debug(f"Пропускаю optional поле: {field}")
-                continue
-
-            lifecycle = _resolve_field_lifecycle(config, field)
-            var_name = f"created_{field}"
-
-            _append_lifecycle_setup(
-                scenario, target_endpoint, field, value,
-                lifecycle, variables, var_name,
+            field = dep_info["field"]
+            value = dep_info["value"]
+            config = dep_info["config"]
+            phases = _field_lifecycle_phases(main_action, config, target_endpoint)
+            logger.debug(f"Lifecycle {field} @ {dep_path}: phases={sorted(phases)}")
+            _apply_field_lifecycle(
+                scenario, target_endpoint, field, value, config,
+                main_action, variables, phases,
             )
-            _append_lifecycle_teardown(
-                scenario, field, value, lifecycle, variables,
-            )
+
+        # =====================================================================
+        # ENDPOINT_RULES: setup/teardown самого тестируемого API
+        # =====================================================================
+        _apply_endpoint_action_lifecycle(
+            scenario, target_endpoint, main_action, action_data,
+            endpoint_rules, variables,
+        )
 
         # =====================================================================
         # АВТО-ОБРАБОТКА ИНТЕРФЕЙСОВ (ifname на любом уровне: ifname, port[].ifname, …)
@@ -1507,7 +1658,7 @@ def build_test_scenarios(target_endpoint, method, raw_payloads, dependencies_con
                     if k in iface_rules and isinstance(v, str):
                         _apply_interface_lifecycle(
                             scenario, target_endpoint, k, v, iface_rules,
-                            variables, handled_ifnames,
+                            variables, handled_ifnames, main_action=main_action,
                         )
                     _scan_for_interfaces(v, new_path)
             elif isinstance(obj, list):
@@ -1581,6 +1732,8 @@ def main():
     endpoints = []
     for endpoint in post_endpoints:
         endpoints.append(endpoint)
+
+    endpoints = ["/acl/filter/filter_ipv4", "/vrf", "/ipsla", "/ipsla/config", "/interfaces/tunnel/add"]
     
     for target_endpoint in endpoints:
         # Метод ендпоинта
