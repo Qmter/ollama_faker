@@ -1,3 +1,4 @@
+import copy
 import json
 import logging
 import time
@@ -6,6 +7,43 @@ import sys
 logger = logging.getLogger(__name__)
 
 class ResolveScheme:
+    @staticmethod
+    def _merge_resolved_schema(base: dict, overlay: dict) -> dict:
+        """
+        Объединяет развёрнутую схему по $ref с sibling-ключами (OpenAPI 3 / JSON Schema).
+        overlay дополняет и уточняет base: required, properties, unevaluatedProperties и т.д.
+        """
+        if not isinstance(base, dict):
+            return copy.deepcopy(overlay) if isinstance(overlay, dict) else base
+        if not isinstance(overlay, dict):
+            return copy.deepcopy(base)
+
+        result = copy.deepcopy(base)
+        for key, value in overlay.items():
+            if key == "properties" and isinstance(value, dict):
+                merged_props = copy.deepcopy(result.get("properties", {}))
+                for prop_name, prop_schema in value.items():
+                    if (
+                        prop_name in merged_props
+                        and isinstance(prop_schema, dict)
+                        and isinstance(merged_props[prop_name], dict)
+                    ):
+                        merged_props[prop_name] = ResolveScheme._merge_resolved_schema(
+                            merged_props[prop_name], prop_schema,
+                        )
+                    else:
+                        merged_props[prop_name] = copy.deepcopy(prop_schema)
+                result["properties"] = merged_props
+            elif key == "required" and isinstance(value, list):
+                merged_required = list(result.get("required", []))
+                for req in value:
+                    if req not in merged_required:
+                        merged_required.append(req)
+                result["required"] = merged_required
+            else:
+                result[key] = copy.deepcopy(value)
+        return result
+
     @staticmethod
     def _resolve_ref(obj, components, seen=None):
         try:
@@ -43,6 +81,12 @@ class ResolveScheme:
                         logger.debug(f"Разрешаю $ref: {ref}")
                         resolved = ResolveScheme._resolve_ref(schema, components, seen)
                         seen.discard(key)
+                        siblings = {k: v for k, v in obj.items() if k != "$ref"}
+                        if not siblings:
+                            return resolved
+                        resolved_siblings = ResolveScheme._resolve_ref(siblings, components, seen)
+                        if isinstance(resolved, dict) and isinstance(resolved_siblings, dict):
+                            return ResolveScheme._merge_resolved_schema(resolved, resolved_siblings)
                         return resolved
                     else:
                         logger.debug(f"⏭Игнорирую нестандартную ссылку: {ref}")

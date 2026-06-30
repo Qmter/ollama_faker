@@ -8,6 +8,7 @@ import argparse
 from dataclasses import dataclass
 from pathlib import Path
 from jsf import JSF
+from ollama_orchestrator import OllamaOrchestrator
 from resolve_scheme import ResolveScheme
 
 # =============================================================================
@@ -26,37 +27,6 @@ def configure_logging(debug: bool = False) -> None:
         datefmt="%Y-%m-%d %H:%M:%S",
         force=True,
     )
-
-
-# =============================================================================
-# МИНИМАЛЬНЫЙ OLLAMA: ТОЛЬКО DESCRIPTION
-# =============================================================================
-USE_OLLAMA = False
-ollama_available = False
-
-if USE_OLLAMA:
-    try:
-        import requests
-        
-        def generate_test_description(scenario: dict) -> str:
-            """Генерирует краткое описание теста через Ollama"""
-            payload = {
-                "model": "qwen2.5-coder:7b",
-                "prompt": f"Write a single sentence in English describing this API test. Only text, no quotes or markdown:\n{json.dumps(scenario['main_test'], indent=2)}",
-                "stream": False,
-                "options": {"temperature": 0.3}
-            }
-            resp = requests.post("http://localhost:11434/api/generate", json=payload, timeout=120)
-            text = resp.json().get("response", "").strip()
-            # Очистка от markdown
-            text = text.replace("```", "").strip()
-            return text if text else "Automatically generated test description."
-        
-        ollama_available = True
-        logger.info("Ollama: доступен (только description)")
-    except Exception as e:
-        logger.warning(f"Ollama недоступен: {e}. Описание будет дефолтным.")
-        ollama_available = False
 
 
 # =============================================================================
@@ -826,7 +796,37 @@ def build_minimal_payload(schema: dict) -> dict:
     return _minimal_object_composed(schema)
 
 
-def generate_value_coverage_payloads(schema: dict, *, compact: bool = False) -> list:
+@dataclass
+class PayloadCoverage:
+    payload: dict
+    coverage_keys: list[str]
+
+
+def _format_coverage_key(path: str, value) -> str:
+    return f"{path}={json.dumps(value, sort_keys=True, ensure_ascii=False)}"
+
+
+def _coverage_sort_key(coverage_keys: list[str]) -> str:
+    if not coverage_keys:
+        return "\uffff"
+    return "|".join(sorted(coverage_keys))
+
+
+def _merge_coverage_records(records: dict[str, PayloadCoverage], record: PayloadCoverage) -> None:
+    fingerprint = _payload_fingerprint(record.payload)
+    if fingerprint not in records:
+        records[fingerprint] = PayloadCoverage(
+            copy.deepcopy(record.payload),
+            list(record.coverage_keys),
+        )
+        return
+    existing = records[fingerprint]
+    for key in record.coverage_keys:
+        if key not in existing.coverage_keys:
+            existing.coverage_keys.append(key)
+
+
+def generate_value_coverage_payloads(schema: dict, *, compact: bool = False) -> list[PayloadCoverage]:
     """
     Генерирует пейлоады для покрытия enum/boolean/границ.
     Для action oneOf — покрытие по веткам rule type без дубля add/delete.
@@ -852,10 +852,9 @@ def generate_value_coverage_payloads(schema: dict, *, compact: bool = False) -> 
         + (" (compact enum)" if compact else "")
     )
 
-    payloads: list = []
+    payloads: list[PayloadCoverage] = []
     seen_payloads: set = set()
     covered_targets: set = set()
-    skipped_estimate = 0
 
     for slc in slices:
         slice_payloads = _generate_slice_coverage(
@@ -907,18 +906,12 @@ def generate_value_coverage_payloads(schema: dict, *, compact: bool = False) -> 
     return payloads
 
 
-def dedupe_payloads(payloads: list) -> list:
-    """
-    Удаляет дубликаты пейлоадов из списка.
-    """
-    seen = set() # Создаем пустое множество для результата
-    result = [] # Создаем пустой список для результата
-    for payload in payloads:
-        key = _payload_fingerprint(payload) # Получаем ключ для пейлоада
-        if key not in seen:
-            seen.add(key) # Добавляем ключ в множество
-            result.append(payload)
-    return result # Возвращаем список пейлоадов без дубликатов
+def dedupe_payloads(records: list[PayloadCoverage]) -> list[PayloadCoverage]:
+    """Удаляет дубликаты пейлоадов, объединяя coverage_keys."""
+    merged: dict[str, PayloadCoverage] = {}
+    for record in records:
+        _merge_coverage_records(merged, record)
+    return list(merged.values())
 
 
 # =============================================================================
@@ -1025,6 +1018,30 @@ def _discover_coverage_slices(schema: dict) -> list[CoverageSlice]:
             slices.append(CoverageSlice(label, verb, rule_key, verb == "add"))
 
     return slices
+
+
+def build_coverage_expectations(schema: dict, *, compact: bool = False) -> set[str]:
+    """Ожидаемые ключи покрытия значений для эндпоинта."""
+    field_schemas = ResolveScheme.extract_field_schemas(schema)
+    path_values = _filter_coverage_paths(
+        {
+            path: collect_test_values(field_schema)
+            for path, field_schema in field_schemas.items()
+            if not path.endswith("[]")
+        },
+        field_schemas,
+    )
+    all_paths = set(path_values)
+    expected: set[str] = set()
+    for path, values in path_values.items():
+        if _is_mirror_delete_path(path, all_paths):
+            continue
+        for value in _limit_values_for_compact(values, field_schemas[path], compact):
+            expected.add(_format_coverage_key(path, value))
+    for slc in _discover_coverage_slices(schema):
+        if not slc.full_coverage and slc.rule_key:
+            expected.add(_format_coverage_key(f"__slice__.{slc.label}", "minimal"))
+    return expected
 
 
 def _path_belongs_to_rule_branch(path: str, rule_key: str) -> bool:
@@ -1160,22 +1177,35 @@ def _generate_slice_coverage(
     seen_payloads: set,
     covered_targets: set,
     compact: bool,
-) -> list:
-    payloads: list = []
+) -> list[PayloadCoverage]:
+    payloads: list[PayloadCoverage] = []
+    records: dict[str, PayloadCoverage] = {}
 
-    def _add(payload, label="", path=None, value=None, mirror=True):
+    def _add(
+        payload,
+        label="",
+        coverage_keys: list[str] | None = None,
+        path=None,
+        value=None,
+        mirror=True,
+    ):
         payload = _coerce_payload_to_schema(payload, schema)
-        key = _payload_fingerprint(payload)
-        if key in seen_payloads:
+        keys = list(coverage_keys or [])
+        if path is not None:
+            keys.append(_format_coverage_key(path, value))
+        fingerprint = _payload_fingerprint(payload)
+        if fingerprint in seen_payloads:
             if path is not None:
                 _mark_covered(covered_targets, path, value, mirror_paths=mirror)
+            if keys:
+                _merge_coverage_records(records, PayloadCoverage(payload, keys))
             return True
         valid, reason = _validate_payload(payload, schema)
         if not valid:
             logger.debug(f"Пропуск [{slc.label}] ({label}): {reason}")
             return False
-        seen_payloads.add(key)
-        payloads.append(copy.deepcopy(payload))
+        seen_payloads.add(fingerprint)
+        _merge_coverage_records(records, PayloadCoverage(copy.deepcopy(payload), keys))
         if path is not None:
             _mark_covered(covered_targets, path, value, mirror_paths=mirror)
         return True
@@ -1186,13 +1216,20 @@ def _generate_slice_coverage(
         if _path_in_slice(p, slc)
     }
 
+    slice_minimal_key = f"__slice_minimal__:{slc.label}"
+
     if not slc.full_coverage:
         minimal = _minimal_payload_for_slice(schema, slc, field_schemas, path_values)
-        _add(minimal, f"minimal/{slc.label}", mirror=False)
-        return payloads
+        _add(
+            minimal,
+            f"minimal/{slc.label}",
+            coverage_keys=[slice_minimal_key],
+            mirror=False,
+        )
+        return list(records.values())
 
     minimal = _minimal_payload_for_slice(schema, slc, field_schemas, path_values)
-    _add(minimal, f"minimal/{slc.label}")
+    _add(minimal, f"minimal/{slc.label}", coverage_keys=[slice_minimal_key])
 
     for path, test_values in sorted(slice_paths.items()):
         for value in test_values:
@@ -1200,39 +1237,51 @@ def _generate_slice_coverage(
             set_field_test_value(variant, schema, path, value)
             _add(variant, f"{path}={value!r}", path=path, value=value)
 
+    payloads.extend(records.values())
     return payloads
 
 
 def _generate_flat_coverage(
     schema: dict, path_values: dict, field_schemas: dict, compact: bool,
-) -> list:
+) -> list[PayloadCoverage]:
     """Legacy: одно flat-покрытие для простых схем без action oneOf."""
     minimal_base = build_minimal_payload(schema)
-    payloads: list = []
+    records: dict[str, PayloadCoverage] = {}
     seen: set = set()
     covered_targets: set = set()
     skipped = 0
 
-    def _add(payload, label="", path=None, value=None):
+    def _add(
+        payload,
+        label="",
+        coverage_keys: list[str] | None = None,
+        path=None,
+        value=None,
+    ):
         nonlocal skipped
         payload = _coerce_payload_to_schema(payload, schema)
-        key = _payload_fingerprint(payload)
-        if key in seen:
+        keys = list(coverage_keys or [])
+        if path is not None:
+            keys.append(_format_coverage_key(path, value))
+        fingerprint = _payload_fingerprint(payload)
+        if fingerprint in seen:
             if path is not None:
                 covered_targets.add(_coverage_target_key(path, value))
+            if keys:
+                _merge_coverage_records(records, PayloadCoverage(payload, keys))
             return True
         valid, reason = _validate_payload(payload, schema)
         if not valid:
             skipped += 1
             logger.debug(f"Пропуск ({label}): {reason}")
             return False
-        seen.add(key)
-        payloads.append(copy.deepcopy(payload))
+        seen.add(fingerprint)
+        _merge_coverage_records(records, PayloadCoverage(copy.deepcopy(payload), keys))
         if path is not None:
             covered_targets.add(_coverage_target_key(path, value))
         return True
 
-    _add(minimal_base, "minimal")
+    _add(minimal_base, "minimal", coverage_keys=["__minimal__"])
 
     for path, test_values in sorted(path_values.items()):
         limited = _limit_values_for_compact(test_values, field_schemas[path], compact)
@@ -1253,11 +1302,11 @@ def _generate_flat_coverage(
             f"из {len(expected_targets)}"
         )
     logger.info(
-        f"Покрытие значений: {len(payloads)} пейлоадов, "
+        f"Покрытие значений: {len(records)} пейлоадов, "
         f"целей {len(covered_targets)}/{len(expected_targets)}"
         + (f", пропущено попыток: {skipped}" if skipped else "")
     )
-    return payloads
+    return list(records.values())
 
 
 # =============================================================================
@@ -1645,23 +1694,66 @@ def _apply_endpoint_action_lifecycle(scenario, target_endpoint, main_action,
 # =============================================================================
 # ПОДСТАНОВКА ПЕРЕМЕННЫХ В ОБЪЕКТЕ (рекурсивно)
 # =============================================================================
-def _replace_placeholders(obj, variables):
+_PLACEHOLDER_CONTEXT_KEY = "__placeholder_context__"
+_PLACEHOLDER_RE = re.compile(r"\{\{\s*([^}]+?)\s*\}\}")
+
+
+def _get_nested_placeholder_value(obj, path: str):
+    """Читает скалярное значение из вложенного dict по dotted-пути (settings.source)."""
+    current = obj
+    for part in path.split("."):
+        if not part or not isinstance(current, dict) or part not in current:
+            return None
+        current = current[part]
+    if isinstance(current, (dict, list)):
+        return None
+    return current
+
+
+def _resolve_placeholder(name: str, variables: dict, context: dict | None) -> str | None:
+    name = name.strip()
+    if not name or name.startswith("__"):
+        return None
+    if name in variables:
+        value = variables[name]
+        if value is not None and not isinstance(value, (dict, list)):
+            return str(value)
+    if context is None:
+        return None
+    if "." in name:
+        value = _get_nested_placeholder_value(context, name)
+    elif name in context:
+        value = context[name]
+    else:
+        return None
+    if value is not None and not isinstance(value, (dict, list)):
+        return str(value)
+    return None
+
+
+def _replace_placeholders(obj, variables, context: dict | None = None):
     """
-    Заменяет {{var}} и {{ var }} на реальные значения в словаре/списке/строке
-    Например, для obj={"name": "test", "age": 20} и variables={"name": "John", "age": 30}
-    будет возвращен объект:
-    {"name": "John", "age": 30}
+    Заменяет {{var}} и {{ var }} на реальные значения в словаре/списке/строке.
+    Плоские имена берутся из variables; dotted-пути ({{settings.source}}) — из
+    variables или из context (пейлоад main_test), если передан.
     """
+    if context is None:
+        context = variables.get(_PLACEHOLDER_CONTEXT_KEY)
+
     if isinstance(obj, dict):
-        return {k: _replace_placeholders(v, variables) for k, v in obj.items()} # Заменяем значения в словаре
-    elif isinstance(obj, list):
-        return [_replace_placeholders(item, variables) for item in obj] # Заменяем значения в списке
-    elif isinstance(obj, str):
-        for var_name, var_value in variables.items(): # Для каждого ключа и значения
-            obj = obj.replace(f"{{{{ {var_name} }}}}", str(var_value))
-            obj = obj.replace(f"{{{{{var_name}}}}}", str(var_value)) # Заменяем значения в строке
-        return obj # Возвращаем объект
-    return obj # Возвращаем объект
+        return {
+            k: _replace_placeholders(v, variables, context)
+            for k, v in obj.items()
+        }
+    if isinstance(obj, list):
+        return [_replace_placeholders(item, variables, context) for item in obj]
+    if isinstance(obj, str):
+        def _substitute(match: re.Match) -> str:
+            resolved = _resolve_placeholder(match.group(1), variables, context)
+            return resolved if resolved is not None else match.group(0)
+
+        return _PLACEHOLDER_RE.sub(_substitute, obj)
+    return obj
 
 
 def _lifecycle_vars(field_name, field_value, variables: dict | None = None) -> dict:
@@ -2079,10 +2171,12 @@ def _apply_interface_lifecycle(scenario, target_endpoint, field_name, field_valu
 # ФОРМИРОВАНИЕ ТЕСТ-СЦЕНАРИЕВ (С INTERFACE_RULES + SELF-SKIP ДЛЯ SETUP)
 # =============================================================================
 def build_test_scenarios(
-    target_endpoint, method, raw_payloads, dependencies_config,
+    target_endpoint, method, payload_records, dependencies_config,
     request_schema: dict | None = None,
+    ollama: OllamaOrchestrator | None = None,
+    expected_coverage: set[str] | None = None,
 ):
-    logger.info(f"Формирую тест-сценарии для {len(raw_payloads)} пейлоадов...")
+    logger.info(f"Формирую тест-сценарии для {len(payload_records)} пейлоадов...")
     os.makedirs("tests", exist_ok=True)
     safe_name = target_endpoint.strip("/").replace("/", "_") + f"_{method}.json"
     filepath = Path("tests") / safe_name
@@ -2101,12 +2195,14 @@ def build_test_scenarios(
         )
     scenarios = []
 
-    for idx, payload in enumerate(raw_payloads, 1):
+    for record in payload_records:
+        payload = record.payload
         main_payload = copy.deepcopy(payload)
-        variables = {}
+        variables = {_PLACEHOLDER_CONTEXT_KEY: copy.deepcopy(payload)}
 
         scenario = {
-            "test_id": idx,
+            "test_id": 0,
+            "coverage_keys": sorted(set(record.coverage_keys)),
             "setup": [],
             "main_test": {
                 "endpoint": target_endpoint,
@@ -2185,19 +2281,43 @@ def build_test_scenarios(
             teardown_step["payload"] = _replace_placeholders(teardown_step["payload"], variables)
 
         # =====================================================================
-        # DESCRIPTION ЧЕРЕЗ OLLAMA
+        # DESCRIPTION (OPTIONAL OLLAMA)
         # =====================================================================
-        if ollama_available:
+        default_description = f"Auto-test: {method.upper()} {target_endpoint}"
+        if ollama and ollama.has_feature("describe"):
             try:
-                desc = generate_test_description(scenario)
-                scenario["description"] = desc
+                scenario["description"] = ollama.generate_test_description(scenario)
             except Exception as e:
-                logger.warning(f"Не удалось сгенерировать description: {e}")
-                scenario["description"] = f"Тест для {method.upper()} {target_endpoint}"
+                logger.warning(f"Failed to generate description: {e}")
+                scenario["description"] = default_description
         else:
-            scenario["description"] = f"Автотест: {method.upper()} {target_endpoint}"
+            scenario["description"] = default_description
 
         scenarios.append(scenario)
+
+    scenarios.sort(key=lambda item: _coverage_sort_key(item["coverage_keys"]))
+    for idx, scenario in enumerate(scenarios, 1):
+        scenario["test_id"] = idx
+
+    if expected_coverage:
+        present = {
+            key
+            for scenario in scenarios
+            for key in scenario["coverage_keys"]
+        }
+        missing = expected_coverage - present
+        matched = expected_coverage & present
+        logger.info(
+            "Coverage keys in tests: %d/%d",
+            len(matched),
+            len(expected_coverage),
+        )
+        if missing:
+            logger.warning("Missing coverage keys (%d):", len(missing))
+            for key in sorted(missing)[:20]:
+                logger.warning("  • %s", key)
+            if len(missing) > 20:
+                logger.warning("  … and %d more", len(missing) - 20)
 
     with open(filepath, "w", encoding="utf-8") as f:
         json.dump(scenarios, f, indent=2, ensure_ascii=False)
@@ -2230,6 +2350,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--compact-coverage",
         action="store_true",
         help="Компактное покрытие: большие enum (>10) → 3 значения вместо всех",
+    )
+    parser.add_argument(
+        "--ollama",
+        action="store_true",
+        help="Ollama: описания тестов и читаемые имена ресурсов (английский)",
+    )
+    parser.add_argument(
+        "--ollama-features",
+        metavar="LIST",
+        help="Фичи Ollama через запятую: describe, enrich (по умолчанию: describe,enrich)",
     )
     return parser.parse_args(argv)
 
@@ -2269,6 +2399,7 @@ def main(argv: list[str] | None = None):
 
     logger.info("Запуск генератора тестов...")
     start_main = time.time()
+    ollama = OllamaOrchestrator.from_cli(args.ollama, args.ollama_features)
     
     # Открываем файл с зависимостями
     with open("dependencies.json", "r", encoding="utf-8") as f:
@@ -2328,12 +2459,15 @@ def main(argv: list[str] | None = None):
             faker = JSF(clean_schema)
 
             # 1) Целенаправленное покрытие значений (enum, boolean, границы чисел)
+            expected_coverage = build_coverage_expectations(
+                clean_schema, compact=args.compact_coverage,
+            )
             final_payloads = generate_value_coverage_payloads(
                 clean_schema, compact=args.compact_coverage,
             )
             covered_fields = set() # Создаем множество для полей, которые покрыты
-            for payload in final_payloads:
-                covered_fields.update(get_payload_fields(payload)) # Добавляем поля, которые покрыты в множество
+            for record in final_payloads:
+                covered_fields.update(get_payload_fields(record.payload))
 
             missing = all_expected_fields - covered_fields # Получаем поля, которые не покрыты
             if missing:
@@ -2346,8 +2480,9 @@ def main(argv: list[str] | None = None):
                     break # Если поля покрыты, выходим из цикла
                 try:
                     payload = _coerce_payload_to_schema(faker.generate(), clean_schema)
-                    final_payloads.append(payload) # Добавляем пейлоад в список
-                    covered_fields.update(get_payload_fields(payload)) # Добавляем поля, которые покрыты в множество
+                    fill_key = f"__field_fill__:{','.join(sorted(missing))}"
+                    final_payloads.append(PayloadCoverage(payload, [fill_key]))
+                    covered_fields.update(get_payload_fields(payload))
                     missing = all_expected_fields - covered_fields
                     if not missing: # Если поля покрыты, выходим из цикла
                         logger.info(f"100% покрытие полей достигнуто за {len(final_payloads)} пейлоадов") # Логируем 100% покрытие полей
@@ -2364,10 +2499,26 @@ def main(argv: list[str] | None = None):
             final_payloads = dedupe_payloads(final_payloads) # Убираем дубликаты пейлоадов
             logger.info(f"Итого уникальных пейлоадов: {len(final_payloads)}")
 
+            if ollama.has_feature("enrich"):
+                field_schemas = ResolveScheme.extract_field_schemas(clean_schema)
+                enriched_payloads = ollama.enrich_payloads(
+                    [record.payload for record in final_payloads],
+                    clean_schema,
+                    field_schemas,
+                    target_endpoint,
+                    method=method.upper(),
+                )
+                final_payloads = [
+                    PayloadCoverage(payload, record.coverage_keys)
+                    for payload, record in zip(enriched_payloads, final_payloads)
+                ]
+
             # Строим json тест
             build_test_scenarios(
                 target_endpoint, method, final_payloads, dependencies,
                 request_schema=clean_schema,
+                ollama=ollama,
+                expected_coverage=expected_coverage,
             )
             
             logger.info(f"Генерация завершена. Общее время: {time.time() - start_main:.2f} сек.") # Логируем общее время генерации
