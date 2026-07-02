@@ -5,6 +5,7 @@ import copy
 import time
 import logging
 import argparse
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from jsf import JSF
@@ -16,17 +17,82 @@ from resolve_scheme import ResolveScheme
 # =============================================================================
 logger = logging.getLogger("MAIN")
 
+_LOG_FORMAT = "%(asctime)s | %(levelname)-7s | %(name)-15s | %(message)s"
+_LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
-def configure_logging(debug: bool = False) -> None:
+
+class _ListLogHandler(logging.Handler):
+    """Собирает записи лога в память (для воркеров)."""
+
+    def __init__(self, buffer: list[str]):
+        super().__init__()
+        self._buffer = buffer
+        self.setFormatter(logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATE_FORMAT))
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self._buffer.append(self.format(record) + "\n")
+
+
+@dataclass
+class _EndpointTaskResult:
+    endpoint: str
+    log_lines: list[str]
+    error: BaseException | None = None
+
+
+def configure_logging(debug: bool = False, *, filemode: str = "w") -> None:
     level = logging.DEBUG if debug else logging.INFO
     logging.basicConfig(
         filename="test.log",
-        filemode="w",
+        filemode=filemode,
         level=level,
-        format="%(asctime)s | %(levelname)-7s | %(name)-15s | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
+        format=_LOG_FORMAT,
+        datefmt=_LOG_DATE_FORMAT,
         force=True,
     )
+
+
+def _configure_worker_capture_logging(verbose: bool) -> list[str]:
+    """Лог воркера только в память; main допишет блоком в test.log."""
+    buffer: list[str] = []
+    level = logging.DEBUG if verbose else logging.INFO
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.setLevel(level)
+    root.addHandler(_ListLogHandler(buffer))
+    for logger_name in list(logging.root.manager.loggerDict):
+        child = logging.getLogger(logger_name)
+        child.handlers.clear()
+        child.propagate = True
+        child.setLevel(level)
+    return buffer
+
+
+def _flush_log_handlers() -> None:
+    for handler in logging.root.handlers:
+        handler.flush()
+
+
+def _append_log_block(lines: list[str]) -> None:
+    if not lines:
+        return
+    _flush_log_handlers()
+    with open("test.log", "a", encoding="utf-8") as log_file:
+        log_file.writelines(lines)
+
+
+def _write_generation_summary(started_at: float, endpoint_count: int) -> None:
+    """Пишет итоговое время в конец test.log (после всех воркеров)."""
+    _flush_log_handlers()
+    elapsed = time.time() - started_at
+    message = (
+        f"Генерация завершена. Общее время: {elapsed:.2f} сек. "
+        f"(эндпоинтов: {endpoint_count})"
+    )
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    line = f"{timestamp} | INFO    | MAIN            | {message}\n"
+    with open("test.log", "a", encoding="utf-8") as log_file:
+        log_file.write(line)
 
 
 # =============================================================================
@@ -1636,7 +1702,6 @@ def _apply_auto_scalar_delete_lifecycle(
             "endpoint": target_endpoint,
             "method": "POST",
             "payload": {"action": {"delete": id_value}},
-            "expected_status": 200,
             "note": f"Auto-teardown: delete {id_field}={id_value}",
         })
         variables[id_field] = id_value
@@ -1772,8 +1837,9 @@ def _append_custom_lifecycle_step(scenario, phase, step_def, variables):
         "endpoint": step_def["endpoint"], # Добавляем endpoint в шаг
         "method": step_def.get("method", "POST").upper(),
         "payload": payload,
-        "expected_status": step_def.get("expected_status", 200),
     }
+    if phase == "setup":
+        step["expected_status"] = step_def.get("expected_status", 200)
     if note := step_def.get("note"): # Если есть note
         step["note"] = note # Добавляем note в шаг
     if phase == "setup": # Если фаза setup
@@ -1846,7 +1912,6 @@ def _default_delete_step(endpoint, field_name, field_value, lifecycle):
         "endpoint": endpoint, # Добавляем endpoint в шаг
         "method": "POST", # Добавляем method в шаг
         "payload": payload, # Добавляем payload в шаг
-        "expected_status": 200, # Добавляем expected_status в шаг
         "note": f"Cleanup {field_name}", # Добавляем note в шаг
         "_default_delete": True, # Добавляем _default_delete в шаг
     }
@@ -2293,6 +2358,9 @@ def build_test_scenarios(
         else:
             scenario["description"] = default_description
 
+        for teardown_step in scenario["teardown"]:
+            teardown_step.pop("expected_status", None)
+
         scenarios.append(scenario)
 
     scenarios.sort(key=lambda item: _coverage_sort_key(item["coverage_keys"]))
@@ -2352,6 +2420,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Компактное покрытие: большие enum (>10) → 3 значения вместо всех",
     )
     parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Параллельная генерация в N процессах (только при 2+ эндпоинтах; по умолчанию 1)",
+    )
+    parser.add_argument(
         "--ollama",
         action="store_true",
         help="Ollama: описания тестов и читаемые имена ресурсов (английский)",
@@ -2390,11 +2465,140 @@ def resolve_target_endpoints(requested: list[str] | None, all_endpoints: list[st
     return normalized
 
 
+def generate_single_endpoint(
+    target_endpoint: str,
+    dependencies: dict,
+    interface_inventory: dict | None,
+    *,
+    compact_coverage: bool,
+    ollama: OllamaOrchestrator,
+) -> str:
+    """Генерирует тесты для одного POST-эндпоинта. Возвращает путь эндпоинта."""
+    method = "post"
+    start = time.time()
+    logger.info(f"Целевой эндпоинт: {method.upper()} {target_endpoint}")
+
+    resolved_endpoint = ResolveScheme.resolve_endpoint(
+        openapi_file="openapi.json", endpoint_path=target_endpoint, method=method
+    )
+    request_schema = resolved_endpoint['requestBody']['content']['application/json']['schema']
+
+    clean_schema = preprocess_schema_for_jsf(request_schema)
+    clean_schema = apply_interface_inventory(clean_schema, interface_inventory)
+    logger.debug("Схема препроцессирована для JSF")
+
+    arguments = ResolveScheme.find_all_patterns_min_max(schema=clean_schema)
+    logger.info(f"Извлечены правила: {json.dumps(arguments, indent=2)}")
+
+    all_expected_fields = extract_all_fields(clean_schema)
+    logger.info(
+        f"Ожидается покрытие {len(all_expected_fields)} полей: "
+        f"{sorted(all_expected_fields)}"
+    )
+
+    faker = JSF(clean_schema)
+
+    expected_coverage = build_coverage_expectations(
+        clean_schema, compact=compact_coverage,
+    )
+    final_payloads = generate_value_coverage_payloads(
+        clean_schema, compact=compact_coverage,
+    )
+    covered_fields = set()
+    for record in final_payloads:
+        covered_fields.update(get_payload_fields(record.payload))
+
+    missing = all_expected_fields - covered_fields
+    if missing:
+        logger.info(
+            f"После покрытия значений не хватает полей: {sorted(missing)}. "
+            "Добираю случайной генерацией..."
+        )
+
+    max_attempts = 50
+    for i in range(max_attempts):
+        if not missing:
+            break
+        try:
+            payload = _coerce_payload_to_schema(faker.generate(), clean_schema)
+            fill_key = f"__field_fill__:{','.join(sorted(missing))}"
+            final_payloads.append(PayloadCoverage(payload, [fill_key]))
+            covered_fields.update(get_payload_fields(payload))
+            missing = all_expected_fields - covered_fields
+            if not missing:
+                logger.info(
+                    f"100% покрытие полей достигнуто за {len(final_payloads)} пейлоадов"
+                )
+                break
+            if (i + 1) % 5 == 0:
+                logger.info(
+                    f"Попытка {i+1}/{max_attempts} | "
+                    f"Поля: {len(covered_fields)}/{len(all_expected_fields)} | "
+                    f"Осталось: {sorted(missing)}"
+                )
+        except Exception as e:
+            logger.warning(f"Ошибка генерации на попытке {i+1}: {e}. Пропускаю.")
+            continue
+    else:
+        if missing:
+            logger.warning(
+                f"Достигнут лимит ({max_attempts}). Не покрыты поля: {sorted(missing)}"
+            )
+
+    final_payloads = dedupe_payloads(final_payloads)
+    logger.info(f"Итого уникальных пейлоадов: {len(final_payloads)}")
+
+    if ollama.has_feature("enrich"):
+        field_schemas = ResolveScheme.extract_field_schemas(clean_schema)
+        enriched_payloads = ollama.enrich_payloads(
+            [record.payload for record in final_payloads],
+            clean_schema,
+            field_schemas,
+            target_endpoint,
+            method=method.upper(),
+        )
+        final_payloads = [
+            PayloadCoverage(payload, record.coverage_keys)
+            for payload, record in zip(enriched_payloads, final_payloads)
+        ]
+
+    build_test_scenarios(
+        target_endpoint, method, final_payloads, dependencies,
+        request_schema=clean_schema,
+        ollama=ollama,
+        expected_coverage=expected_coverage,
+    )
+
+    logger.info(
+        f"Эндпоинт {target_endpoint}: готово за {time.time() - start:.2f} сек."
+    )
+    return target_endpoint
+
+
+def _generate_endpoint_task(job: dict) -> _EndpointTaskResult:
+    log_buffer = _configure_worker_capture_logging(job["verbose"])
+    try:
+        ollama = OllamaOrchestrator.from_cli(job["use_ollama"], job["ollama_features"])
+        endpoint = generate_single_endpoint(
+            job["target_endpoint"],
+            job["dependencies"],
+            job["interface_inventory"],
+            compact_coverage=job["compact_coverage"],
+            ollama=ollama,
+        )
+        return _EndpointTaskResult(endpoint, log_buffer)
+    except Exception as exc:
+        logger.exception("Ошибка генерации %s", job["target_endpoint"])
+        return _EndpointTaskResult(job["target_endpoint"], log_buffer, error=exc)
+
+
 # =============================================================================
 # MAIN
 # =============================================================================
 def main(argv: list[str] | None = None):
     args = parse_args(argv)
+    if args.workers < 1:
+        raise SystemExit("--workers должен быть >= 1")
     configure_logging(debug=args.verbose)
 
     logger.info("Запуск генератора тестов...")
@@ -2426,106 +2630,56 @@ def main(argv: list[str] | None = None):
         logger.info(f"Выбрано эндпоинтов: {len(endpoints)}")
     else:
         logger.info(f"Все POST-эндпоинты из openapi.json: {len(endpoints)}")
-    
-    for target_endpoint in endpoints:
-        # Метод ендпоинта
-        method = "post"
-        logger.info(f"Целевой эндпоинт: {method.upper()} {target_endpoint}")
 
-        try:
-            # Разрешаем схему для этого ендпоинта
-            resolved_endpoint = ResolveScheme.resolve_endpoint(
-                openapi_file="openapi.json", endpoint_path=target_endpoint, method=method
-            )
+    effective_workers = args.workers if len(endpoints) > 1 else 1
+    if len(endpoints) <= 1 and args.workers > 1:
+        logger.info(
+            f"--workers={args.workers} игнорируется: выбран 1 эндпоинт, "
+            "параллельная генерация не используется"
+        )
+    elif effective_workers > 1:
+        effective_workers = min(effective_workers, len(endpoints))
+        logger.info(f"Параллельная генерация: {effective_workers} процесс(ов)")
 
-            # Берем из разрешенной схемы тольео поле schema
-            request_schema = resolved_endpoint['requestBody']['content']['application/json']['schema']
-            
-            # Для лучшей работы JSF отчищвем схему от OneOf, AnyOf и тд., приводя её к enum
-            clean_schema = preprocess_schema_for_jsf(request_schema)
-            clean_schema = apply_interface_inventory(clean_schema, interface_inventory)
-            logger.debug("Схема препроцессирована для JSF")
-            # print(json.dumps(clean_schema, indent=2))
-
-            # Получаем все аргументы из схемы
-            arguments = ResolveScheme.find_all_patterns_min_max(schema=clean_schema)
-            logger.info(f"Извлечены правила: {json.dumps(arguments, indent=2)}")
-
-            # Получаем аргументы необходямые для покрытия ендпоинта тестами
-            all_expected_fields = extract_all_fields(clean_schema)
-            logger.info(f"Ожидается покрытие {len(all_expected_fields)} полей: {sorted(all_expected_fields)}")
-
-            # Создаем объект JSF и передаем отчищенную схему
-            faker = JSF(clean_schema)
-
-            # 1) Целенаправленное покрытие значений (enum, boolean, границы чисел)
-            expected_coverage = build_coverage_expectations(
-                clean_schema, compact=args.compact_coverage,
-            )
-            final_payloads = generate_value_coverage_payloads(
-                clean_schema, compact=args.compact_coverage,
-            )
-            covered_fields = set() # Создаем множество для полей, которые покрыты
-            for record in final_payloads:
-                covered_fields.update(get_payload_fields(record.payload))
-
-            missing = all_expected_fields - covered_fields # Получаем поля, которые не покрыты
-            if missing:
-                logger.info(f"После покрытия значений не хватает полей: {sorted(missing)}. Добираю случайной генерацией...")
-
-            # 2) Добираем оставшиеся поля случайной генерацией JSF (сложные oneOf и т.п.)
-            max_attempts = 50 # Максимальное количество попыток
-            for i in range(max_attempts):
-                if not missing:
-                    break # Если поля покрыты, выходим из цикла
+    try:
+        if effective_workers > 1:
+            jobs = [
+                {
+                    "target_endpoint": target_endpoint,
+                    "dependencies": dependencies,
+                    "interface_inventory": interface_inventory,
+                    "compact_coverage": args.compact_coverage,
+                    "use_ollama": args.ollama,
+                    "ollama_features": args.ollama_features,
+                    "verbose": args.verbose,
+                }
+                for target_endpoint in endpoints
+            ]
+            with ProcessPoolExecutor(max_workers=effective_workers) as pool:
+                futures = {
+                    pool.submit(_generate_endpoint_task, job): job["target_endpoint"]
+                    for job in jobs
+                }
+                for future in as_completed(futures):
+                    result = future.result()
+                    _append_log_block(result.log_lines)
+                    if result.error is not None:
+                        raise result.error
+        else:
+            for target_endpoint in endpoints:
                 try:
-                    payload = _coerce_payload_to_schema(faker.generate(), clean_schema)
-                    fill_key = f"__field_fill__:{','.join(sorted(missing))}"
-                    final_payloads.append(PayloadCoverage(payload, [fill_key]))
-                    covered_fields.update(get_payload_fields(payload))
-                    missing = all_expected_fields - covered_fields
-                    if not missing: # Если поля покрыты, выходим из цикла
-                        logger.info(f"100% покрытие полей достигнуто за {len(final_payloads)} пейлоадов") # Логируем 100% покрытие полей
-                        break
-                    if (i + 1) % 5 == 0:
-                        logger.info(f"Попытка {i+1}/{max_attempts} | Поля: {len(covered_fields)}/{len(all_expected_fields)} | Осталось: {sorted(missing)}")
+                    generate_single_endpoint(
+                        target_endpoint,
+                        dependencies,
+                        interface_inventory,
+                        compact_coverage=args.compact_coverage,
+                        ollama=ollama,
+                    )
                 except Exception as e:
-                    logger.warning(f"Ошибка генерации на попытке {i+1}: {e}. Пропускаю.")
-                    continue
-            else:
-                if missing: # Если поля не покрыты, логируем ошибку
-                    logger.warning(f"Достигнут лимит ({max_attempts}). Не покрыты поля: {sorted(missing)}")
-
-            final_payloads = dedupe_payloads(final_payloads) # Убираем дубликаты пейлоадов
-            logger.info(f"Итого уникальных пейлоадов: {len(final_payloads)}")
-
-            if ollama.has_feature("enrich"):
-                field_schemas = ResolveScheme.extract_field_schemas(clean_schema)
-                enriched_payloads = ollama.enrich_payloads(
-                    [record.payload for record in final_payloads],
-                    clean_schema,
-                    field_schemas,
-                    target_endpoint,
-                    method=method.upper(),
-                )
-                final_payloads = [
-                    PayloadCoverage(payload, record.coverage_keys)
-                    for payload, record in zip(enriched_payloads, final_payloads)
-                ]
-
-            # Строим json тест
-            build_test_scenarios(
-                target_endpoint, method, final_payloads, dependencies,
-                request_schema=clean_schema,
-                ollama=ollama,
-                expected_coverage=expected_coverage,
-            )
-            
-            logger.info(f"Генерация завершена. Общее время: {time.time() - start_main:.2f} сек.") # Логируем общее время генерации
-            
-        except Exception as e:
-            logger.critical(f"Критическая ошибка в main: {e}", exc_info=True) # Логируем критическую ошибку
-            raise
+                    logger.critical(f"Критическая ошибка в main: {e}", exc_info=True)
+                    raise
+    finally:
+        _write_generation_summary(start_main, len(endpoints))
 
 
 if __name__ == "__main__":
