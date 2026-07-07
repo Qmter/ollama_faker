@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import os
 import re
@@ -459,6 +461,91 @@ def _schema_has_composition(schema: dict) -> bool:
 
 _NUMERIC_BOUNDS = ('minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum')
 _STRING_BOUNDS = ('minLength', 'maxLength')
+_VLAN_ID_MIN = 1
+_VLAN_ID_MAX = 4094
+_VID_RANGE_LIST_RE = re.compile(
+    r"^([1-9][0-9]{0,3}([\-][1-9][0-9]{0,3})?)"
+    r"([,][1-9][0-9]{0,3}([\-][1-9][0-9]{0,3})?)*$"
+)
+
+
+def _is_vid_range_list_schema(schema: dict) -> bool:
+    if _resolve_schema_type(schema) != 'string':
+        return False
+    description = (schema.get('description') or '').lower()
+    if 'vlan id range' in description or 'vlan id list' in description:
+        return True
+    pattern = schema.get('pattern', '')
+    return (
+        r"[1-9][0-9]{0,3}([\\-][1-9][0-9]{0,3})?" in pattern
+        and r"[\,]" in pattern
+    )
+
+
+def _is_semantically_valid_vid_range_list(value: str) -> bool:
+    """Regex OpenAPI не гарантирует low<=high в сегментах вида 45-68."""
+    if not isinstance(value, str) or not _VID_RANGE_LIST_RE.fullmatch(value):
+        return False
+    try:
+        for part in value.split(','):
+            part = part.strip()
+            if not part:
+                return False
+            if '-' in part:
+                low_text, high_text = part.split('-', 1)
+                low, high = int(low_text), int(high_text)
+                if low > high or low < _VLAN_ID_MIN or high > _VLAN_ID_MAX:
+                    return False
+            else:
+                number = int(part)
+                if number < _VLAN_ID_MIN or number > _VLAN_ID_MAX:
+                    return False
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def _vid_range_list_test_values() -> list[str]:
+    return [
+        "2",
+        "45-68",
+        "100",
+        "1-10",
+        "4091",
+        "2,45-68,4091",
+        "10-20,100",
+    ]
+
+
+def _validate_instance_semantics(instance, schema: dict) -> tuple[bool, str]:
+    if not isinstance(schema, dict):
+        return True, ""
+
+    if _is_vid_range_list_schema(schema):
+        if isinstance(instance, str) and not _is_semantically_valid_vid_range_list(instance):
+            return False, f"некорректный VID_RANGE_LIST: {instance!r}"
+        return True, ""
+
+    schema_type = _resolve_schema_type(schema)
+    if schema_type == 'object' and isinstance(instance, dict):
+        properties = schema.get('properties', {})
+        for key, value in instance.items():
+            if key in properties:
+                ok, message = _validate_instance_semantics(value, properties[key])
+                if not ok:
+                    return False, f"{key}: {message}"
+        return True, ""
+
+    if schema_type == 'array' and isinstance(instance, list):
+        items = schema.get('items', {})
+        if isinstance(items, dict):
+            for index, item in enumerate(instance):
+                ok, message = _validate_instance_semantics(item, items)
+                if not ok:
+                    return False, f"[{index}]: {message}"
+        return True, ""
+
+    return True, ""
 _ARRAY_BOUNDS = ('minItems', 'maxItems')
 
 
@@ -498,6 +585,12 @@ def _generate_values_from_schemas(schemas: list) -> list:
     for sub in schemas:
         try:
             value = _jsf_generate(sub)
+            if (
+                _is_vid_range_list_schema(sub)
+                and isinstance(value, str)
+                and not _is_semantically_valid_vid_range_list(value)
+            ):
+                continue
             if value not in values:
                 values.append(value)
         except Exception:
@@ -711,6 +804,20 @@ def collect_test_values(field_schema: dict) -> list:
         return _append_null_if_allowed(schema, _generate_values_from_schemas(subs))
 
     if field_type == 'string':
+        if _is_vid_range_list_schema(schema):
+            values = list(_vid_range_list_test_values())
+            for _ in range(8):
+                try:
+                    candidate = _jsf_generate(schema)
+                    if (
+                        isinstance(candidate, str)
+                        and _is_semantically_valid_vid_range_list(candidate)
+                        and candidate not in values
+                    ):
+                        values.append(candidate)
+                except Exception:
+                    pass
+            return _append_null_if_allowed(schema, values)
         subs = _pinned_subschemas(schema, _STRING_BOUNDS)
         subs.append(schema)
         return _append_null_if_allowed(schema, _generate_values_from_schemas(subs))
@@ -847,19 +954,48 @@ def _validate_payload(payload, schema: dict) -> tuple[bool, str]:
     try:
         import jsonschema
         jsonschema.validate(instance=payload, schema=_expand_nullable_schema(schema))
-        return True, ""
     except ImportError:
-        return True, ""
+        pass
     except Exception as e:
         message = str(e).split("\n", 1)[0]
         return False, message
+
+    ok, message = _validate_instance_semantics(payload, schema)
+    if not ok:
+        return False, message
+    return True, ""
+
+
+def _schema_allows_explicit_null(prop_schema: dict) -> bool:
+    """Поле допускает JSON null (oneOf/type union) — устройство может требовать ключ явно."""
+    if _schema_allows_null(prop_schema):
+        return True
+    for keyword in ("oneOf", "anyOf"):
+        for branch in prop_schema.get(keyword, []):
+            if isinstance(branch, dict) and branch.get("type") == "null":
+                return True
+    return False
+
+
+def _enrich_optional_null_fields(payload: dict, schema: dict) -> dict:
+    """Добавляет optional-поля со значением null, если схема это допускает."""
+    if _resolve_schema_type(schema) != "object":
+        return payload
+    result = copy.deepcopy(payload)
+    for name, prop_schema in schema.get("properties", {}).items():
+        if name in result or name in schema.get("required", []):
+            continue
+        if _schema_allows_explicit_null(prop_schema):
+            result[name] = None
+    return result
 
 
 def build_minimal_payload(schema: dict) -> dict:
     """Пейлоад только с required-полями с учётом composition."""
     if _resolve_schema_type(schema) != 'object':
         return _coerce_payload_to_schema(_jsf_generate(schema), schema)
-    return _minimal_object_composed(schema)
+    minimal = _minimal_object_composed(schema)
+    return _enrich_optional_null_fields(minimal, schema)
 
 
 @dataclass
@@ -1466,6 +1602,28 @@ def _collect_bind_vars(obj, into: dict | None = None) -> dict:
     return into
 
 
+def _collect_endpoint_bind_vars(
+    payload: dict,
+    action_data: dict,
+    bind_fields: list[str],
+) -> dict:
+    """
+    Плейсхолдеры для endpoint_rules: поля из action.* + top-level (ifnames, …).
+    """
+    bind_vars = _collect_bind_vars(action_data) if action_data else {}
+    if not bind_fields:
+        return bind_vars
+    for key in bind_fields:
+        if key in bind_vars or key not in payload:
+            continue
+        val = payload[key]
+        if isinstance(val, dict):
+            _collect_bind_vars(val, bind_vars)
+        elif val is not None:
+            bind_vars[key] = val
+    return {k: bind_vars[k] for k in bind_fields if k in bind_vars}
+
+
 def _lifecycle_endpoint_from_config(config: dict, phase: str) -> str | None:
     """Endpoint из setup/teardown или legacy create/delete."""
     alt = "create" if phase == "setup" else "delete"
@@ -1491,6 +1649,109 @@ def _is_prerequisite_field(config: dict, target_endpoint: str) -> bool:
     return False
 
 
+_TEARDOWN_PRIORITY_KEY = "_teardown_priority"
+# Меньше → раньше в teardown (интерфейсы до VRF и прочих prerequisite)
+_TEARDOWN_PRIORITY_INTERFACE = 10
+_TEARDOWN_PRIORITY_DEFAULT = 50
+_TEARDOWN_PRIORITY_PREREQUISITE = 100
+
+_SETUP_PRIORITY_KEY = "_setup_priority"
+# Меньше → раньше в setup. Явный setup_priority в dependencies.json перекрывает всё ниже.
+_SETUP_PHASE_ORDER: dict[str, int] = {
+    "prerequisite": 10,  # vrf, dhcp pool — другой эндпоинт, чем main_test
+    "interface": 20,       # interface_rules: создание ifname
+    "field": 30,           # field_mappings: enslave, acl, …
+    "endpoint": 40,        # endpoint_rules
+    "auto": 50,            # авто lifecycle (scalar delete setup)
+}
+_SETUP_PRIORITY_DEFAULT = 50
+
+
+def _resolve_teardown_priority(
+    config: dict,
+    target_endpoint: str,
+    default: int = _TEARDOWN_PRIORITY_DEFAULT,
+) -> int:
+    if (explicit := config.get("teardown_priority")) is not None:
+        return int(explicit)
+    if _is_prerequisite_field(config, target_endpoint):
+        return _TEARDOWN_PRIORITY_PREREQUISITE
+    return default
+
+
+def _append_teardown_step(scenario: dict, step: dict, priority: int) -> None:
+    step = copy.deepcopy(step)
+    step[_TEARDOWN_PRIORITY_KEY] = priority
+    scenario["teardown"].append(step)
+
+
+def _sort_scenario_teardown(scenario: dict) -> None:
+    indexed = list(enumerate(scenario["teardown"]))
+    indexed.sort(
+        key=lambda item: (
+            item[1].pop(_TEARDOWN_PRIORITY_KEY, _TEARDOWN_PRIORITY_DEFAULT),
+            item[0],
+        ),
+    )
+    scenario["teardown"] = [step for _, step in indexed]
+
+
+def _setup_action_rank(step: dict) -> int:
+    """Внутри одной фазы: POST …/add раньше прочих шагов (capability, shutdown, …)."""
+    endpoint = step.get("endpoint", "").rstrip("/")
+    if endpoint.endswith("/add"):
+        return 0
+    return 1
+
+
+def _resolve_setup_priority(
+    step: dict,
+    *,
+    config: dict | None = None,
+    phase: str = "field",
+    target_endpoint: str | None = None,
+) -> int:
+    if (explicit := step.get("setup_priority")) is not None:
+        return int(explicit)
+    if config and (explicit := config.get("setup_priority")) is not None:
+        return int(explicit)
+    if config and target_endpoint and _is_prerequisite_field(config, target_endpoint):
+        phase = "prerequisite"
+    phase_base = _SETUP_PHASE_ORDER.get(phase, _SETUP_PRIORITY_DEFAULT)
+    return phase_base * 10 + _setup_action_rank(step)
+
+
+def _append_setup_step(
+    scenario: dict,
+    step: dict,
+    *,
+    priority: int | None = None,
+    config: dict | None = None,
+    phase: str = "field",
+    target_endpoint: str | None = None,
+) -> None:
+    step = copy.deepcopy(step)
+    step[_SETUP_PRIORITY_KEY] = (
+        priority
+        if priority is not None
+        else _resolve_setup_priority(
+            step, config=config, phase=phase, target_endpoint=target_endpoint,
+        )
+    )
+    scenario["setup"].append(step)
+
+
+def _sort_scenario_setup(scenario: dict) -> None:
+    indexed = list(enumerate(scenario["setup"]))
+    indexed.sort(
+        key=lambda item: (
+            item[1].pop(_SETUP_PRIORITY_KEY, _SETUP_PRIORITY_DEFAULT),
+            item[0],
+        ),
+    )
+    scenario["setup"] = [step for _, step in indexed]
+
+
 def _field_lifecycle_phases(main_action: str | None, config: dict, target_endpoint: str) -> set:
     """
     Какие фазы lifecycle нужны для field_mapping с учётом action в main_test.
@@ -1509,8 +1770,21 @@ def _field_lifecycle_phases(main_action: str | None, config: dict, target_endpoi
     return {"setup", "teardown"}
 
 
-def _apply_field_lifecycle(scenario, target_endpoint, field, value, config,
-                           main_action, variables, phases: set):
+def _apply_field_lifecycle(
+    scenario,
+    target_endpoint,
+    field,
+    value,
+    config,
+    main_action,
+    variables,
+    phases: set,
+    *,
+    setup_phase: str = "field",
+    env_file: dict | None = None,
+    vid_pool: _VidPool | None = None,
+    endpoint_rules: dict | None = None,
+):
     """Setup/teardown для одного field_mapping с учётом phases."""
     if config.get("optional") and value in (None, "", []):
         return
@@ -1522,13 +1796,22 @@ def _apply_field_lifecycle(scenario, target_endpoint, field, value, config,
         _append_lifecycle_setup(
             scenario, target_endpoint, field, value,
             lifecycle, variables, var_name, main_action=main_action,
+            setup_phase=setup_phase,
+            field_config=config,
+            env_file=env_file,
+            vid_pool=vid_pool,
+            endpoint_rules=endpoint_rules,
         )
     else:
         variables.setdefault(var_name, value)
 
     if "teardown" in phases:
+        teardown_priority = _resolve_teardown_priority(config, target_endpoint)
         _append_lifecycle_teardown(
             scenario, field, value, lifecycle, variables,
+            teardown_priority=teardown_priority,
+            env_file=env_file,
+            vid_pool=vid_pool,
         )
 
 
@@ -1704,6 +1987,7 @@ def _apply_auto_scalar_delete_lifecycle(
             "payload": {"action": {"delete": id_value}},
             "note": f"Auto-teardown: delete {id_field}={id_value}",
         })
+        scenario["teardown"][-1][_TEARDOWN_PRIORITY_KEY] = _TEARDOWN_PRIORITY_DEFAULT
         variables[id_field] = id_value
         logger.debug(f"Auto-teardown scalar delete: {id_field}={id_value}")
 
@@ -1716,44 +2000,84 @@ def _apply_auto_scalar_delete_lifecycle(
         setup_payload = _build_auto_add_setup_payload(
             add_inner_schema, id_field, delete_value,
         )
-        scenario["setup"].append({
-            "endpoint": target_endpoint,
-            "method": "POST",
-            "payload": setup_payload,
-            "expected_status": 200,
-            "note": f"Auto-setup: add {id_field}={delete_value}",
-        })
+        _append_setup_step(
+            scenario,
+            {
+                "endpoint": target_endpoint,
+                "method": "POST",
+                "payload": setup_payload,
+                "expected_status": 200,
+                "note": f"Auto-setup: add {id_field}={delete_value}",
+            },
+            phase="auto",
+        )
         variables["delete"] = delete_value
         variables[id_field] = delete_value
         logger.debug(f"Auto-setup before scalar delete: {id_field}={delete_value}")
 
 
-def _apply_endpoint_action_lifecycle(scenario, target_endpoint, main_action,
-                                     action_data, endpoint_rules, variables):
-    """Setup/teardown самого эндпоинта из endpoint_rules по action main_test."""
-    if not main_action:
-        return
+def _get_endpoint_rules(target_endpoint: str, endpoint_rules: dict) -> dict | None:
+    rules = endpoint_rules.get(target_endpoint) or endpoint_rules.get(
+        target_endpoint.rstrip("/"),
+    )
+    return rules if rules else None
 
-    rules = endpoint_rules.get(target_endpoint) or endpoint_rules.get(target_endpoint.rstrip("/"))
+
+def _apply_endpoint_rules_lifecycle(
+    scenario,
+    target_endpoint,
+    payload,
+    main_action,
+    action_data,
+    endpoint_rules,
+    variables,
+):
+    """
+    Setup/teardown из endpoint_rules:
+    - с action в main_test → блок add/delete/modify/clear;
+    - без action → top-level setup/teardown на ключе эндпоинта.
+    """
+    rules = _get_endpoint_rules(target_endpoint, endpoint_rules)
     if not rules:
         return
 
-    action_rules = rules.get(main_action, {})
     bind_fields = rules.get("bind_fields", [])
-    bind_vars = _collect_bind_vars(action_data)
     if bind_fields:
-        bind_vars = {k: bind_vars[k] for k in bind_fields if k in bind_vars}
+        bind_vars = _collect_endpoint_bind_vars(payload, action_data, bind_fields)
+    elif main_action:
+        bind_vars = _collect_bind_vars(action_data) if action_data else {}
+    else:
+        bind_vars = _collect_bind_vars(payload) if isinstance(payload, dict) else {}
     variables.update(bind_vars)
 
+    teardown_priority = int(
+        rules.get("teardown_priority", _TEARDOWN_PRIORITY_DEFAULT),
+    )
+
+    if main_action:
+        lifecycle_source = rules.get(main_action, {})
+        scope_label = f"action {main_action} on {target_endpoint}"
+    else:
+        lifecycle_source = rules
+        scope_label = target_endpoint
+
     for phase in ("setup", "teardown"):
-        for step_def in _as_lifecycle_list(action_rules.get(phase)):
+        for step_def in _as_lifecycle_list(lifecycle_source.get(phase)):
             if not isinstance(step_def, dict) or "endpoint" not in step_def:
                 continue
             step = copy.deepcopy(step_def)
             if "note" not in step:
-                step["note"] = f"{phase}: action {main_action} on {target_endpoint}"
-            _append_custom_lifecycle_step(scenario, phase, step, variables)
-            logger.debug(f"Endpoint {phase} ({main_action}): {step['endpoint']}")
+                step["note"] = f"{phase}: {scope_label}"
+            step_priority = (
+                teardown_priority if phase == "teardown" else None
+            )
+            _append_custom_lifecycle_step(
+                scenario, phase, step, variables,
+                teardown_priority=step_priority,
+                setup_phase="endpoint",
+                target_endpoint=target_endpoint,
+            )
+            logger.debug(f"Endpoint {phase} ({scope_label}): {step['endpoint']}")
 
 
 # =============================================================================
@@ -1761,6 +2085,7 @@ def _apply_endpoint_action_lifecycle(scenario, target_endpoint, main_action,
 # =============================================================================
 _PLACEHOLDER_CONTEXT_KEY = "__placeholder_context__"
 _PLACEHOLDER_RE = re.compile(r"\{\{\s*([^}]+?)\s*\}\}")
+_WHOLE_PLACEHOLDER_RE = re.compile(r"^\{\{\s*([^}]+?)\s*\}\}$")
 
 
 def _get_nested_placeholder_value(obj, path: str):
@@ -1775,25 +2100,36 @@ def _get_nested_placeholder_value(obj, path: str):
     return current
 
 
-def _resolve_placeholder(name: str, variables: dict, context: dict | None) -> str | None:
+_PLACEHOLDER_MISSING = object()
+
+
+def _resolve_placeholder_value(name: str, variables: dict, context: dict | None):
+    """Возвращает скалярное значение плейсхолдера с исходным типом."""
     name = name.strip()
     if not name or name.startswith("__"):
-        return None
+        return _PLACEHOLDER_MISSING
     if name in variables:
-        value = variables[name]
-        if value is not None and not isinstance(value, (dict, list)):
-            return str(value)
+        return variables[name]
     if context is None:
-        return None
+        return _PLACEHOLDER_MISSING
     if "." in name:
         value = _get_nested_placeholder_value(context, name)
     elif name in context:
         value = context[name]
     else:
+        return _PLACEHOLDER_MISSING
+    return value
+
+
+def _resolve_placeholder(name: str, variables: dict, context: dict | None) -> str | None:
+    value = _resolve_placeholder_value(name, variables, context)
+    if value is _PLACEHOLDER_MISSING:
         return None
-    if value is not None and not isinstance(value, (dict, list)):
-        return str(value)
-    return None
+    if value is None:
+        return None
+    if isinstance(value, (dict, list)):
+        return None
+    return str(value)
 
 
 def _replace_placeholders(obj, variables, context: dict | None = None):
@@ -1813,6 +2149,13 @@ def _replace_placeholders(obj, variables, context: dict | None = None):
     if isinstance(obj, list):
         return [_replace_placeholders(item, variables, context) for item in obj]
     if isinstance(obj, str):
+        whole = _WHOLE_PLACEHOLDER_RE.match(obj)
+        if whole:
+            resolved = _resolve_placeholder_value(whole.group(1), variables, context)
+            if resolved is not _PLACEHOLDER_MISSING:
+                return resolved
+            return obj
+
         def _substitute(match: re.Match) -> str:
             resolved = _resolve_placeholder(match.group(1), variables, context)
             return resolved if resolved is not None else match.group(0)
@@ -1821,15 +2164,210 @@ def _replace_placeholders(obj, variables, context: dict | None = None):
     return obj
 
 
-def _lifecycle_vars(field_name, field_value, variables: dict | None = None) -> dict:
+_ETH_VLAN_IFNAME_RE = re.compile(r"^eth(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$")
+_VLAN_IFNAME_RE = re.compile(r"^vlan(\d+)$")
+
+
+class _VidPool:
+    """Пул VID из VID_RANGE (.env / os.environ) для интерфейсов без vid в имени."""
+
+    def __init__(self, env_file: dict | None = None):
+        self._values = _parse_vid_pool(env_file or {})
+        self._index = 0
+
+    def allocate(self) -> int:
+        if not self._values:
+            return 1
+        value = self._values[self._index % len(self._values)]
+        self._index += 1
+        return value
+
+
+def _parse_vid_pool(env_file: dict) -> list[int]:
+    raw = os.environ.get("VID_RANGE") or env_file.get("VID_RANGE") or ""
+    if not raw:
+        return []
+    values: list[int] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start_s, end_s = part.split("-", 1)
+            start, end = int(start_s.strip()), int(end_s.strip())
+            values.extend(range(start, end + 1))
+        else:
+            values.append(int(part))
+    return list(dict.fromkeys(v for v in values if 1 <= v <= 4094))
+
+
+def _infer_vid_from_ifname(ifname: str) -> int | None:
+    """VID из соглашения об именовании: vlan100 → 100, eth1.200 → 200."""
+    if match := _VLAN_IFNAME_RE.fullmatch(ifname):
+        return int(match.group(1))
+    if match := _ETH_VLAN_IFNAME_RE.fullmatch(ifname):
+        return int(match.group(2))
+    return None
+
+
+def _synchronize_vid_ifname_inplace(obj) -> None:
+    """
+    Согласует vid с ifname в дереве payload.
+    vlan4092 ↔ vid 4092, eth1.200 ↔ vid 200 — иначе vlandb teardown не совпадает с main_test.
+    """
+    if isinstance(obj, dict):
+        ifname = obj.get("ifname")
+        if isinstance(ifname, str) and (inferred := _infer_vid_from_ifname(ifname)) is not None:
+            if obj.get("vid") != inferred:
+                logger.debug(
+                    "sync vid: %s → %s (ifname=%s)",
+                    obj.get("vid"),
+                    inferred,
+                    ifname,
+                )
+            obj["vid"] = inferred
+        for value in obj.values():
+            _synchronize_vid_ifname_inplace(value)
+    elif isinstance(obj, list):
+        for item in obj:
+            _synchronize_vid_ifname_inplace(item)
+
+
+def synchronize_vid_ifname(payload: dict) -> dict:
+    """Копия payload с согласованными vid/ifname."""
+    result = copy.deepcopy(payload)
+    _synchronize_vid_ifname_inplace(result)
+    return result
+
+
+def _resolve_vid(
+    ifname: str,
+    *,
+    env_file: dict | None = None,
+    vid_pool: _VidPool | None = None,
+) -> int:
+    if (inferred := _infer_vid_from_ifname(ifname)) is not None:
+        return inferred
+    if vid_pool is not None:
+        return vid_pool.allocate()
+    pool = _parse_vid_pool(env_file or {})
+    return pool[0] if pool else 1
+
+
+def _enrich_interface_variables(
+    vars_: dict,
+    ifname: str,
+    *,
+    env_file: dict | None = None,
+    vid_pool: _VidPool | None = None,
+) -> None:
+    """Добавляет vid/vlan для плейсхолдеров {{vid}} и {{vlan}} в lifecycle."""
+    ctx = vars_.get(_PLACEHOLDER_CONTEXT_KEY)
+    if (
+        isinstance(ctx, dict)
+        and ctx.get("ifname") == ifname
+        and isinstance(ctx.get("vid"), int)
+    ):
+        vid = ctx["vid"]
+    else:
+        vid = _resolve_vid(ifname, env_file=env_file, vid_pool=vid_pool)
+    vars_["vid"] = vid
+    vars_["vlan"] = str(vid)
+
+
+def _payload_template_uses_vid(payload) -> bool:
+    if isinstance(payload, dict):
+        if "vid" in payload:
+            return True
+        return any(_payload_template_uses_vid(v) for v in payload.values())
+    if isinstance(payload, list):
+        return any(_payload_template_uses_vid(item) for item in payload)
+    if isinstance(payload, str) and payload.strip() == "{{vid}}":
+        return True
+    return False
+
+
+def _lifecycle_vars(
+    field_name,
+    field_value,
+    variables: dict | None = None,
+    *,
+    env_file: dict | None = None,
+    vid_pool: _VidPool | None = None,
+    template_ifname: str | None = None,
+) -> dict:
     """Переменные для {{placeholder}} в setup/teardown."""
-    result = {field_name: field_value, "ifname": field_value} # Создаем словарь с переменными
+    result = {field_name: field_value}
+    if field_name == "ifname":
+        result["ifname"] = field_value
     if variables:
-        result.update(variables) # Обновляем словарь с переменными
-    return result # Возвращаем словарь с переменными
+        result.update(variables)
+    ifname_for_vid = template_ifname or (
+        field_value if isinstance(field_value, str) else None
+    )
+    if ifname_for_vid:
+        _enrich_interface_variables(
+            result, ifname_for_vid, env_file=env_file, vid_pool=vid_pool,
+        )
+    return result
 
 
-def _append_custom_lifecycle_step(scenario, phase, step_def, variables):
+_VLAND_DB_ENDPOINT = "/interfaces/switchport/vlandb"
+
+
+def _vlandb_step_templates(endpoint_rules: dict) -> tuple[dict | None, dict | None]:
+    """Шаблоны add/delete vlandb из endpoint_rules (без хардкода payload)."""
+    rule = endpoint_rules.get(_VLAND_DB_ENDPOINT, {})
+    add_tpl = rule.get("delete", {}).get("setup")
+    del_tpl = rule.get("add", {}).get("teardown")
+    return add_tpl, del_tpl
+
+
+def _ensure_vlandb_lifecycle(
+    scenario: dict,
+    variables: dict,
+    endpoint_rules: dict,
+    *,
+    setup_phase: str = "interface",
+    target_endpoint: str | None = None,
+    field_config: dict | None = None,
+    teardown_priority: int = 90,
+) -> None:
+    """Перед vlan/eth_vlan add — vlandb add; в teardown — vlandb delete для того же vid."""
+    vid = variables.get("vid")
+    if vid is None:
+        return
+    marker = f"_vlandb_tracked_{vid}"
+    if variables.get(marker):
+        return
+    add_tpl, del_tpl = _vlandb_step_templates(endpoint_rules)
+    if not add_tpl or not del_tpl:
+        return
+    variables[marker] = True
+    _append_custom_lifecycle_step(
+        scenario, "setup", add_tpl, variables,
+        setup_phase=setup_phase,
+        target_endpoint=target_endpoint,
+        field_config=field_config,
+    )
+    _append_custom_lifecycle_step(
+        scenario, "teardown", del_tpl, variables,
+        teardown_priority=teardown_priority,
+    )
+    logger.debug(f"Auto vlandb lifecycle для vid={vid}")
+
+
+def _append_custom_lifecycle_step(
+    scenario,
+    phase,
+    step_def,
+    variables,
+    *,
+    teardown_priority: int | None = None,
+    setup_phase: str = "field",
+    target_endpoint: str | None = None,
+    field_config: dict | None = None,
+):
     """Добавляет кастомный setup/teardown из dependencies.json."""
     payload_template = step_def.get("payload", {}) # Получаем шаблон пейлоада
     payload = _replace_placeholders(copy.deepcopy(payload_template), variables) # Заменяем значения в шаблоне пейлоада
@@ -1847,7 +2385,20 @@ def _append_custom_lifecycle_step(scenario, phase, step_def, variables):
             step["extract_to_variable"] = extract_var # Добавляем extract_to_variable в шаг
         if extract_path := step_def.get("response_extract"): # Если есть response_extract
             step["response_extract"] = extract_path # Добавляем response_extract в шаг
-    scenario[phase].append(step) # Добавляем шаг в фазу
+        _append_setup_step(
+            scenario,
+            step,
+            priority=step_def.get("setup_priority"),
+            config=field_config,
+            phase=setup_phase,
+            target_endpoint=target_endpoint,
+        )
+    else:
+        _append_teardown_step(
+            scenario,
+            step,
+            teardown_priority if teardown_priority is not None else _TEARDOWN_PRIORITY_DEFAULT,
+        )
 
 
 def _resolve_field_lifecycle(config: dict, field_name: str) -> dict:
@@ -1949,20 +2500,48 @@ def _iter_teardown_steps(lifecycle, field_name, field_value):
             yield item # Генерируем шаг
 
 
+def _normalize_lifecycle_requirements(value) -> frozenset[str]:
+    """Нормализует requirements: ['setup', 'teardown'] → frozenset."""
+    if not value:
+        return frozenset()
+    items = [value] if isinstance(value, str) else value
+    return frozenset(
+        item.strip().lower()
+        for item in items
+        if isinstance(item, str) and item.strip().lower() in ("setup", "teardown")
+    )
+
+
 def _append_lifecycle_setup(scenario, target_endpoint, field_name, field_value,
-                            lifecycle, variables, var_name, main_action=None):
+                            lifecycle, variables, var_name, main_action=None,
+                            *, lifecycle_requirements: frozenset[str] | None = None,
+                            template_ifname: str | None = None,
+                            setup_phase: str = "field",
+                            field_config: dict | None = None,
+                            env_file: dict | None = None,
+                            vid_pool: _VidPool | None = None,
+                            endpoint_rules: dict | None = None):
     """Setup: один или несколько шагов (setup / create)."""
     steps = list(_iter_setup_steps(lifecycle, field_name, field_value))
     if not steps:
         return
 
     extract_assigned = False
-    vars_ = _lifecycle_vars(field_name, field_value, variables)
+    vars_ = _lifecycle_vars(
+        field_name, field_value, variables,
+        env_file=env_file, vid_pool=vid_pool, template_ifname=template_ifname,
+    )
+    if template_ifname is not None:
+        vars_["ifname"] = template_ifname
+    force_setup = bool(
+        lifecycle_requirements and "setup" in lifecycle_requirements
+    )
+    needs_vlandb = any(_payload_template_uses_vid(step.get("payload", {})) for step in steps)
 
     for step_def in steps:
         endpoint = step_def["endpoint"]
         is_self = endpoint.rstrip("/") == target_endpoint.rstrip("/")
-        if is_self and main_action != "delete":
+        if is_self and main_action != "delete" and not force_setup:
             logger.debug(
                 f"Self-skip setup: тестируем {target_endpoint}, "
                 f"пропускаю {endpoint}"
@@ -1978,49 +2557,129 @@ def _append_lifecycle_setup(scenario, target_endpoint, field_name, field_value,
             extract_assigned = True # Устанавливаем extract_assigned в True
 
         if step.pop("_default_create", False): # Если есть _default_create
-            scenario["setup"].append({
-                "endpoint": step["endpoint"], # Добавляем endpoint в шаг
-                "method": step.get("method", "POST").upper(), # Добавляем method в шаг
-                "payload": step["payload"], # Добавляем payload в шаг
-                "expected_status": step.get("expected_status", 200), # Добавляем expected_status в шаг
-                "extract_to_variable": step["extract_to_variable"], # Добавляем extract_to_variable в шаг
-                "response_extract": step["response_extract"], # Добавляем response_extract в шаг
-            })
+            _append_setup_step(
+                scenario,
+                {
+                    "endpoint": step["endpoint"],
+                    "method": step.get("method", "POST").upper(),
+                    "payload": step["payload"],
+                    "expected_status": step.get("expected_status", 200),
+                    "extract_to_variable": step["extract_to_variable"],
+                    "response_extract": step["response_extract"],
+                },
+                phase=setup_phase,
+                target_endpoint=target_endpoint,
+                config=field_config,
+            )
             logger.debug(f"Setup (create) для {field_name}={field_value} → {endpoint}") # Логируем setup (create)
         else: # Если нет _default_create
-            _append_custom_lifecycle_step(scenario, "setup", step, vars_) # Добавляем кастомный шаг setup
+            _append_custom_lifecycle_step(
+                scenario, "setup", step, vars_,
+                setup_phase=setup_phase,
+                target_endpoint=target_endpoint,
+                field_config=field_config,
+            ) # Добавляем кастомный шаг setup
             logger.debug(f"Кастомный setup для {field_name}={field_value} → {endpoint}") # Логируем кастомный setup
+
+    if needs_vlandb and endpoint_rules:
+        _ensure_vlandb_lifecycle(
+            scenario, vars_, endpoint_rules,
+            setup_phase=setup_phase,
+            target_endpoint=target_endpoint,
+            field_config=field_config,
+        )
+        variables.update({k: vars_[k] for k in ("vid", "vlan") if k in vars_})
 
     variables[var_name] = field_value
 
 
-def _append_lifecycle_teardown(scenario, field_name, field_value, lifecycle, variables):
+def _append_lifecycle_teardown(
+    scenario,
+    field_name,
+    field_value,
+    lifecycle,
+    variables,
+    *,
+    lifecycle_requirements: frozenset[str] | None = None,
+    teardown_priority: int = _TEARDOWN_PRIORITY_DEFAULT,
+    template_ifname: str | None = None,
+    env_file: dict | None = None,
+    vid_pool: _VidPool | None = None,
+):
     """Teardown: один или несколько шагов (teardown / delete)."""
     steps = list(_iter_teardown_steps(lifecycle, field_name, field_value))
-    if not steps: # Если нет шагов
+    if not steps:
+        if lifecycle_requirements and "teardown" in lifecycle_requirements:
+            logger.warning(
+                f"requirements содержит teardown, но шаги не заданы для {field_name}"
+            )
         return
 
-    vars_ = _lifecycle_vars(field_name, field_value, variables) # Создаем переменную для проверки, есть ли extract_to_variable
+    vars_ = _lifecycle_vars(
+        field_name, field_value, variables,
+        env_file=env_file, vid_pool=vid_pool, template_ifname=template_ifname,
+    )
+    if template_ifname is not None:
+        vars_["ifname"] = template_ifname
 
     for step_def in steps: # Для каждого шага
         endpoint = step_def["endpoint"] # Получаем endpoint
         step = copy.deepcopy(step_def) # Копируем шаг
 
         if step.pop("_default_delete", False):
-            scenario["teardown"].append({
-                "endpoint": step["endpoint"], # Добавляем endpoint в шаг
-                "method": step.get("method", "POST").upper(), # Добавляем method в шаг
-                "payload": step["payload"], # Добавляем payload в шаг
-                "note": step.get("note", f"Cleanup {field_name}"), # Добавляем note в шаг
-            })
-            logger.debug(f"Teardown (delete) для {field_name}={field_value} → {endpoint}") # Логируем teardown (delete)
-        else: # Если нет _default_delete
-            _append_custom_lifecycle_step(scenario, "teardown", step, vars_) # Добавляем кастомный шаг teardown
-            logger.debug(f"Кастомный teardown для {field_name}={field_value} → {endpoint}") # Логируем кастомный teardown
+            _append_teardown_step(
+                scenario,
+                {
+                    "endpoint": step["endpoint"],
+                    "method": step.get("method", "POST").upper(),
+                    "payload": step["payload"],
+                    "note": step.get("note", f"Cleanup {field_name}"),
+                },
+                teardown_priority,
+            )
+            logger.debug(f"Teardown (delete) для {field_name}={field_value} → {endpoint}")
+        else:
+            _append_custom_lifecycle_step(
+                scenario, "teardown", step, vars_,
+                teardown_priority=teardown_priority,
+            )
+            logger.debug(f"Кастомный teardown для {field_name}={field_value} → {endpoint}")
 
 # =============================================================================
 # АВТО-ОПРЕДЕЛЕНИЕ ИНТЕРФЕЙСОВ (pattern / prefix, порядок правил важен)
 # =============================================================================
+# Ключи, значения которых не сканируются как ifname (enum/типы, не имена интерфейсов)
+_SKIP_INTERFACE_VALUE_KEYS = frozenset({
+    "action",
+    "mode_type",
+    "mode",
+    "type",
+    "chain",
+    "protocol",
+    "dpi_protocol",
+    "adm_state",
+    "method",
+})
+
+
+def _matches_interface_prefix(field_value: str, prefix: str) -> bool:
+    """
+    Имя интерфейса по prefix: br0, bond0, vlan10, lo.
+    Не matчит произвольные слова с тем же началом (broadcast для br, loopback для lo).
+    """
+    if not field_value.startswith(prefix):
+        return False
+    suffix = field_value[len(prefix):]
+    if not suffix:
+        return True
+    if suffix.isdigit():
+        return True
+    if "." in suffix:
+        head, tail = suffix.split(".", 1)
+        return head.isdigit() and tail.isdigit()
+    return False
+
+
 def _normalize_interface_rules(field_rules: dict) -> list:
     """
     Приводит interface_rules к упорядоченному списку правил.
@@ -2056,7 +2715,7 @@ def _resolve_auto_interface(field_name, field_value, iface_rules):
         if "pattern" in rule:
             matched = bool(re.fullmatch(rule["pattern"], field_value))
         elif "prefix" in rule:
-            matched = field_value.startswith(rule["prefix"])
+            matched = _matches_interface_prefix(field_value, rule["prefix"])
 
         if not matched:
             continue
@@ -2074,6 +2733,10 @@ def _resolve_auto_interface(field_name, field_value, iface_rules):
             result["teardown"] = rule["teardown"]
         elif rule.get("delete"):
             result["delete"] = rule["delete"]
+        if reqs := rule.get("requirements"):
+            result["requirements"] = _normalize_lifecycle_requirements(reqs)
+        if (priority := rule.get("teardown_priority")) is not None:
+            result["teardown_priority"] = int(priority)
         if result:
             return result
 
@@ -2158,7 +2821,7 @@ def _inventory_matches_schema_pattern(entry: dict, schema_pattern: str) -> bool:
     prefix = entry.get("prefix")
     if not prefix:
         return False
-    if not all(name.startswith(prefix) for name in names):
+    if not all(_matches_interface_prefix(name, prefix) for name in names):
         return False
     try:
         return all(re.fullmatch(schema_pattern, name) for name in names)
@@ -2166,11 +2829,27 @@ def _inventory_matches_schema_pattern(entry: dict, schema_pattern: str) -> bool:
         return False
 
 
-def apply_interface_inventory(schema: dict, inventory: list) -> dict:
+def build_eth_parents_with_vlan_children(inventory: list) -> set[str]:
+    """Родительские eth, у которых в инвентаре есть eth-vlan дочерние интерфейсы."""
+    parents: set[str] = set()
+    for entry in inventory:
+        for name in entry.get("names", []):
+            if match := _ETH_VLAN_IFNAME_RE.fullmatch(name):
+                parents.add(f"eth{match.group(1)}")
+    return parents
+
+
+def apply_interface_inventory(
+    schema: dict,
+    inventory: list,
+    *,
+    blocked_eth_parents: set[str] | None = None,
+) -> dict:
     """Подменяет pattern → enum для узлов схемы, подходящих под инвентарь устройства."""
     if not inventory:
         return schema
 
+    blocked_eth_parents = blocked_eth_parents or set()
     schema = copy.deepcopy(schema)
 
     def _walk(obj):
@@ -2180,9 +2859,18 @@ def apply_interface_inventory(schema: dict, inventory: list) -> dict:
         if schema_pattern:
             for entry in inventory:
                 if _inventory_matches_schema_pattern(entry, schema_pattern):
-                    obj["enum"] = entry["names"]
+                    names = list(entry["names"])
+                    if (
+                        blocked_eth_parents
+                        and schema_pattern.startswith("^eth")
+                        and r"\." not in schema_pattern
+                    ):
+                        filtered = [n for n in names if n not in blocked_eth_parents]
+                        if filtered:
+                            names = filtered
+                    obj["enum"] = names
                     logger.debug(
-                        f"Инвентарь для pattern {schema_pattern!r}: {entry['names']}"
+                        f"Инвентарь для pattern {schema_pattern!r}: {names}"
                     )
                     break
         for value in obj.values():
@@ -2197,6 +2885,139 @@ def apply_interface_inventory(schema: dict, inventory: list) -> dict:
     return schema
 
 
+# =============================================================================
+# MOCK DATA (dependencies.json → mock_data, опционально)
+# =============================================================================
+_openapi_components_cache: dict | None = None
+
+
+def load_openapi_components(path: str = "openapi.json") -> dict:
+    """Кэширует components из openapi.json для сопоставления by_schema."""
+    global _openapi_components_cache
+    if _openapi_components_cache is None:
+        openapi_path = Path(path)
+        if openapi_path.is_file():
+            with open(openapi_path, "r", encoding="utf-8") as f:
+                _openapi_components_cache = json.load(f).get("components", {})
+        else:
+            _openapi_components_cache = {}
+    return _openapi_components_cache
+
+
+def _parse_mock_value_list(value) -> list:
+    if isinstance(value, list):
+        return [item for item in value if item is not None and item != ""]
+    if isinstance(value, str):
+        return [part.strip() for part in value.split(",") if part.strip()]
+    if value is None:
+        return []
+    return [value]
+
+
+def parse_mock_data_config(dependencies: dict) -> dict | None:
+    """
+    Извлекает mock_data из dependencies.json.
+    Отсутствие секции или пустые by_schema/by_field → None (генерация как раньше).
+    """
+    raw = dependencies.get("mock_data")
+    if not isinstance(raw, dict):
+        return None
+    by_schema = {
+        name: _parse_mock_value_list(values)
+        for name, values in raw.get("by_schema", {}).items()
+        if _parse_mock_value_list(values)
+    }
+    by_field = {
+        name: _parse_mock_value_list(values)
+        for name, values in raw.get("by_field", {}).items()
+        if _parse_mock_value_list(values)
+    }
+    if not by_schema and not by_field:
+        return None
+    return {"by_schema": by_schema, "by_field": by_field}
+
+
+def build_mock_pattern_index(
+    openapi_components: dict,
+    mock_config: dict,
+) -> dict[str, list]:
+    """pattern OpenAPI-компонента → список mock-значений (только by_schema)."""
+    index: dict[str, list] = {}
+    schemas = openapi_components.get("schemas", {})
+    for schema_name, values in mock_config.get("by_schema", {}).items():
+        component = schemas.get(schema_name)
+        if not isinstance(component, dict):
+            logger.warning(
+                f"mock_data.by_schema: компонент {schema_name!r} не найден в openapi.json"
+            )
+            continue
+        pattern = component.get("pattern")
+        if not pattern:
+            logger.warning(
+                f"mock_data.by_schema: у {schema_name!r} нет pattern — пропуск "
+                "(используйте by_field для этого поля)"
+            )
+            continue
+        if pattern in index:
+            logger.warning(
+                f"mock_data.by_schema: pattern {schema_name!r} дублирует другой компонент"
+            )
+        index[pattern] = list(values)
+        logger.debug(f"mock_data index: {schema_name} → {len(values)} знач.")
+    return index
+
+
+def apply_mock_data(
+    schema: dict,
+    mock_config: dict | None,
+    pattern_index: dict[str, list] | None = None,
+) -> dict:
+    """
+    Подменяет pattern → enum для mock-значений из dependencies.json.
+    Не перезаписывает уже заданный enum (инвентарь интерфейсов и т.п.).
+    """
+    if not mock_config:
+        return schema
+
+    pattern_index = pattern_index or {}
+    by_field = mock_config.get("by_field", {})
+    schema = copy.deepcopy(schema)
+
+    def _walk(obj: dict) -> None:
+        if not isinstance(obj, dict):
+            return
+
+        if not obj.get("enum"):
+            pattern = obj.get("pattern")
+            if pattern and pattern in pattern_index:
+                obj["enum"] = list(pattern_index[pattern])
+                logger.debug(
+                    f"mock_data by_schema (pattern): {pattern_index[pattern]}"
+                )
+
+        for prop_name, prop_schema in obj.get("properties", {}).items():
+            if (
+                prop_name in by_field
+                and isinstance(prop_schema, dict)
+                and not prop_schema.get("enum")
+                and not _schema_has_composition(prop_schema)
+            ):
+                prop_schema["enum"] = list(by_field[prop_name])
+                logger.debug(f"mock_data by_field: {prop_name}={by_field[prop_name]}")
+
+        for keyword in ("properties", "patternProperties"):
+            for item in obj.get(keyword, {}).values():
+                if isinstance(item, dict):
+                    _walk(item)
+        if isinstance(obj.get("items"), dict):
+            _walk(obj["items"])
+        for branch in _iter_schema_branches(obj):
+            _walk(branch)
+
+    _walk(schema)
+    return schema
+
+
 def _interface_var_name(ifname: str) -> str:
     safe = re.sub(r"[^a-zA-Z0-9_]", "_", ifname)
     return f"created_ifname_{safe}"
@@ -2204,7 +3025,10 @@ def _interface_var_name(ifname: str) -> str:
 
 def _apply_interface_lifecycle(scenario, target_endpoint, field_name, field_value,
                                iface_rules, variables, handled_ifnames: set,
-                               main_action=None):
+                               main_action=None,
+                               *, env_file: dict | None = None,
+                               vid_pool: _VidPool | None = None,
+                               endpoint_rules: dict | None = None):
     """Setup/teardown для одного ifname (на любом уровне вложенности пейлоада)."""
     if field_value in handled_ifnames:
         return
@@ -2218,18 +3042,187 @@ def _apply_interface_lifecycle(scenario, target_endpoint, field_name, field_valu
         return
 
     var_name = _interface_var_name(field_value)
+    requirements = lifecycle.get("requirements", frozenset())
     if lifecycle.get("setup") or lifecycle.get("create"):
         _append_lifecycle_setup(
             scenario, target_endpoint, field_name, field_value,
             lifecycle, variables, var_name, main_action=main_action,
+            lifecycle_requirements=requirements,
+            template_ifname=field_value,
+            setup_phase="interface",
+            field_config=lifecycle,
+            env_file=env_file,
+            vid_pool=vid_pool,
+            endpoint_rules=endpoint_rules,
+        )
+    elif "setup" in requirements:
+        logger.warning(
+            f"requirements содержит setup, но шаги не заданы для ifname={field_value}"
         )
 
     if lifecycle.get("teardown") or lifecycle.get("delete"):
+        teardown_priority = int(
+            lifecycle.get("teardown_priority", _TEARDOWN_PRIORITY_INTERFACE),
+        )
         _append_lifecycle_teardown(
             scenario, field_name, field_value, lifecycle, variables,
+            lifecycle_requirements=requirements,
+            teardown_priority=teardown_priority,
+            template_ifname=field_value,
+            env_file=env_file,
+            vid_pool=vid_pool,
+        )
+    elif "teardown" in requirements:
+        logger.warning(
+            f"requirements содержит teardown, но шаги не заданы для ifname={field_value}"
         )
 
     handled_ifnames.add(field_value)
+
+
+def _interface_deferred_prefixes(iface_rules: dict) -> frozenset[str]:
+    """
+    prefix'ы с setup_defer: true в interface_rules — их lifecycle откладывается
+  (например bond создаётся после eth-vlan slave).
+    """
+    deferred: set[str] = set()
+    for rule in _normalize_interface_rules(iface_rules.get("ifname", {})):
+        if rule.get("setup_defer") and (prefix := rule.get("prefix")):
+            deferred.add(prefix)
+    return frozenset(deferred)
+
+
+def _interface_setup_sort_key(ifname: str, iface_rules: dict) -> tuple[int, str]:
+    deferred = _interface_deferred_prefixes(iface_rules)
+    for prefix in deferred:
+        if _matches_interface_prefix(ifname, prefix):
+            return (1, ifname)
+    return (0, ifname)
+
+
+def _collect_interface_candidates(
+    obj,
+    iface_rules,
+    candidates: list,
+    *,
+    discovery_index: int = 0,
+) -> int:
+    """Собирает строки из payload, для которых сработает interface_rules."""
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            if isinstance(value, str):
+                field_name = key if key in iface_rules else "ifname"
+                if key in iface_rules or key not in _SKIP_INTERFACE_VALUE_KEYS:
+                    if field_name in iface_rules and _resolve_auto_interface(
+                        field_name, value, iface_rules,
+                    ):
+                        candidates.append((discovery_index, field_name, value))
+                        discovery_index += 1
+            else:
+                discovery_index = _collect_interface_candidates(
+                    value, iface_rules, candidates,
+                    discovery_index=discovery_index,
+                )
+    elif isinstance(obj, list):
+        for item in obj:
+            if isinstance(item, str):
+                if "ifname" in iface_rules and _resolve_auto_interface(
+                    "ifname", item, iface_rules,
+                ):
+                    candidates.append((discovery_index, "ifname", item))
+                    discovery_index += 1
+            else:
+                discovery_index = _collect_interface_candidates(
+                    item, iface_rules, candidates,
+                    discovery_index=discovery_index,
+                )
+    return discovery_index
+
+
+def _scan_payload_for_interfaces(
+    obj,
+    scenario,
+    target_endpoint,
+    iface_rules,
+    variables,
+    handled_ifnames: set,
+    main_action=None,
+    *,
+    env_file: dict | None = None,
+    vid_pool: _VidPool | None = None,
+    endpoint_rules: dict | None = None,
+):
+    """
+    Ищет имена интерфейсов в payload и применяет lifecycle.
+    Порядок: сначала не-bond (prefix из dependencies.json), затем bond.
+    """
+    candidates: list[tuple[int, str, str]] = []
+    _collect_interface_candidates(obj, iface_rules, candidates)
+    seen: set[tuple[str, str]] = set()
+    ordered: list[tuple[str, str]] = []
+    for _idx, field_name, value in sorted(
+        candidates,
+        key=lambda item: (
+            _interface_setup_sort_key(item[2], iface_rules),
+            item[0],
+        ),
+    ):
+        key = (field_name, value)
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(key)
+
+    for field_name, value in ordered:
+        if value in handled_ifnames:
+            continue
+        _apply_interface_lifecycle(
+            scenario,
+            target_endpoint,
+            field_name,
+            value,
+            iface_rules,
+            variables,
+            handled_ifnames,
+            main_action=main_action,
+            env_file=env_file,
+            vid_pool=vid_pool,
+            endpoint_rules=endpoint_rules,
+        )
+
+
+def _apply_field_mapping_dependencies(
+    scenario,
+    target_endpoint,
+    deps,
+    main_action,
+    variables,
+    *,
+    prerequisites_only: bool,
+    env_file: dict | None = None,
+    vid_pool: _VidPool | None = None,
+    endpoint_rules: dict | None = None,
+):
+    for dep_path, dep_info in deps.items():
+        field = dep_info["field"]
+        value = dep_info["value"]
+        config = dep_info["config"]
+        is_prerequisite = _is_prerequisite_field(config, target_endpoint)
+        if prerequisites_only != is_prerequisite:
+            continue
+        phases = _field_lifecycle_phases(main_action, config, target_endpoint)
+        logger.debug(
+            f"Lifecycle {field} @ {dep_path}: phases={sorted(phases)} "
+            f"({'prerequisite' if is_prerequisite else 'field'})"
+        )
+        _apply_field_lifecycle(
+            scenario, target_endpoint, field, value, config,
+            main_action, variables, phases,
+            setup_phase="prerequisite" if is_prerequisite else "field",
+            env_file=env_file,
+            vid_pool=vid_pool,
+            endpoint_rules=endpoint_rules,
+        )
 
 
 # =============================================================================
@@ -2240,6 +3233,7 @@ def build_test_scenarios(
     request_schema: dict | None = None,
     ollama: OllamaOrchestrator | None = None,
     expected_coverage: set[str] | None = None,
+    env_file: dict | None = None,
 ):
     logger.info(f"Формирую тест-сценарии для {len(payload_records)} пейлоадов...")
     os.makedirs("tests", exist_ok=True)
@@ -2259,9 +3253,11 @@ def build_test_scenarios(
             f"{auto_scalar_delete['id_field']}"
         )
     scenarios = []
+    vid_pool = _VidPool(env_file)
+    env_file = env_file or {}
 
     for record in payload_records:
-        payload = record.payload
+        payload = synchronize_vid_ifname(record.payload)
         main_payload = copy.deepcopy(payload)
         variables = {_PLACEHOLDER_CONTEXT_KEY: copy.deepcopy(payload)}
 
@@ -2282,28 +3278,50 @@ def build_test_scenarios(
         if main_action:
             logger.debug(f"main_test action: {main_action}")
             _collect_bind_vars(action_data, variables)
+        else:
+            _collect_bind_vars(payload, variables)
 
         deps = scan_payload_for_dependencies(payload, dep_map)
 
         # =====================================================================
-        # FIELD_MAPPINGS: setup/teardown по action в main_test
+        # 1. PREREQUISITE field_mappings (vrf, dhcp pool, …)
         # =====================================================================
-        for dep_path, dep_info in deps.items():
-            field = dep_info["field"]
-            value = dep_info["value"]
-            config = dep_info["config"]
-            phases = _field_lifecycle_phases(main_action, config, target_endpoint)
-            logger.debug(f"Lifecycle {field} @ {dep_path}: phases={sorted(phases)}")
-            _apply_field_lifecycle(
-                scenario, target_endpoint, field, value, config,
-                main_action, variables, phases,
-            )
+        _apply_field_mapping_dependencies(
+            scenario, target_endpoint, deps, main_action, variables,
+            prerequisites_only=True,
+            env_file=env_file,
+            vid_pool=vid_pool,
+            endpoint_rules=endpoint_rules,
+        )
+
+        # =====================================================================
+        # 2. INTERFACE_RULES (создание ifname; bond — после остальных)
+        # =====================================================================
+        handled_ifnames = set()
+        _scan_payload_for_interfaces(
+            payload, scenario, target_endpoint, iface_rules,
+            variables, handled_ifnames, main_action,
+            env_file=env_file,
+            vid_pool=vid_pool,
+            endpoint_rules=endpoint_rules,
+        )
+
+        # =====================================================================
+        # 3. FIELD_MAPPINGS (enslave, acl lifecycle, …)
+        # =====================================================================
+        _apply_field_mapping_dependencies(
+            scenario, target_endpoint, deps, main_action, variables,
+            prerequisites_only=False,
+            env_file=env_file,
+            vid_pool=vid_pool,
+            endpoint_rules=endpoint_rules,
+        )
 
         # =====================================================================
         # ENDPOINT_RULES: setup/teardown самого тестируемого API
         # =====================================================================
-        _apply_endpoint_action_lifecycle(
-            scenario, target_endpoint, main_action, action_data,
+        _apply_endpoint_rules_lifecycle(
+            scenario, target_endpoint, payload, main_action, action_data,
             endpoint_rules, variables,
         )
 
@@ -2314,27 +3332,6 @@ def build_test_scenarios(
             scenario, target_endpoint, main_action, payload,
             auto_scalar_delete, endpoint_rules, variables, deps,
         )
-
-        # =====================================================================
-        # АВТО-ОБРАБОТКА ИНТЕРФЕЙСОВ (ifname на любом уровне: ifname, port[].ifname, …)
-        # =====================================================================
-        handled_ifnames = set()
-
-        def _scan_for_interfaces(obj, path=""):
-            if isinstance(obj, dict):
-                for k, v in obj.items():
-                    new_path = f"{path}.{k}" if path else k
-                    if k in iface_rules and isinstance(v, str):
-                        _apply_interface_lifecycle(
-                            scenario, target_endpoint, k, v, iface_rules,
-                            variables, handled_ifnames, main_action=main_action,
-                        )
-                    _scan_for_interfaces(v, new_path)
-            elif isinstance(obj, list):
-                for i, item in enumerate(obj):
-                    _scan_for_interfaces(item, f"{path}[{i}]")
-
-        _scan_for_interfaces(payload)
 
         # =====================================================================
         # ПОДСТАНОВКА РЕАЛЬНЫХ ЗНАЧЕНИЙ
@@ -2360,6 +3357,9 @@ def build_test_scenarios(
 
         for teardown_step in scenario["teardown"]:
             teardown_step.pop("expected_status", None)
+
+        _sort_scenario_setup(scenario)
+        _sort_scenario_teardown(scenario)
 
         scenarios.append(scenario)
 
@@ -2405,7 +3405,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--endpoint",
         nargs="+",
         metavar="PATH",
-        help="Эндпоинт или список эндпоинтов (POST). Без -e — все POST из openapi.json",
+        help="Эндпоинт или список эндпоинтов (POST). Без -e/-d — все POST из openapi.json",
+    )
+    parser.add_argument(
+        "-d",
+        "--dir",
+        nargs="+",
+        metavar="PREFIX",
+        help="Префикс пути: все POST-эндпоинты, начинающиеся с PREFIX (напр. -d /interfaces)",
     )
     parser.add_argument(
         "-v",
@@ -2465,6 +3472,44 @@ def resolve_target_endpoints(requested: list[str] | None, all_endpoints: list[st
     return normalized
 
 
+def _normalize_prefix(prefix: str) -> str:
+    normalized = _normalize_endpoint(prefix).rstrip("/")
+    return normalized or "/"
+
+
+def resolve_endpoints_by_prefix(
+    prefixes: list[str],
+    all_endpoints: list[str],
+) -> list[str]:
+    """Эндпоинты, совпадающие с префиксом: /interfaces → /interfaces, /interfaces/..."""
+    normalized = [_normalize_prefix(prefix) for prefix in prefixes]
+    matched: list[str] = []
+    for endpoint in all_endpoints:
+        for prefix in normalized:
+            if endpoint == prefix or endpoint.startswith(f"{prefix}/"):
+                matched.append(endpoint)
+                break
+    if not matched:
+        raise SystemExit(
+            "Нет POST-эндпоинтов с префиксом: "
+            + ", ".join(normalized)
+        )
+    return matched
+
+
+def resolve_run_endpoints(
+    *,
+    requested: list[str] | None,
+    dir_prefixes: list[str] | None,
+    all_endpoints: list[str],
+) -> list[str]:
+    if requested and dir_prefixes:
+        raise SystemExit("Укажите либо -e, либо -d, но не оба одновременно")
+    if dir_prefixes:
+        return resolve_endpoints_by_prefix(dir_prefixes, all_endpoints)
+    return resolve_target_endpoints(requested, all_endpoints)
+
+
 def generate_single_endpoint(
     target_endpoint: str,
     dependencies: dict,
@@ -2472,6 +3517,7 @@ def generate_single_endpoint(
     *,
     compact_coverage: bool,
     ollama: OllamaOrchestrator,
+    env_file: dict | None = None,
 ) -> str:
     """Генерирует тесты для одного POST-эндпоинта. Возвращает путь эндпоинта."""
     method = "post"
@@ -2484,7 +3530,21 @@ def generate_single_endpoint(
     request_schema = resolved_endpoint['requestBody']['content']['application/json']['schema']
 
     clean_schema = preprocess_schema_for_jsf(request_schema)
-    clean_schema = apply_interface_inventory(clean_schema, interface_inventory)
+    blocked_parents = build_eth_parents_with_vlan_children(interface_inventory or [])
+    clean_schema = apply_interface_inventory(
+        clean_schema, interface_inventory, blocked_eth_parents=blocked_parents,
+    )
+    mock_config = parse_mock_data_config(dependencies)
+    if mock_config:
+        pattern_index = build_mock_pattern_index(
+            load_openapi_components(), mock_config,
+        )
+        clean_schema = apply_mock_data(clean_schema, mock_config, pattern_index)
+        logger.info(
+            "mock_data: by_schema=%d, by_field=%d",
+            len(mock_config.get("by_schema", {})),
+            len(mock_config.get("by_field", {})),
+        )
     logger.debug("Схема препроцессирована для JSF")
 
     arguments = ResolveScheme.find_all_patterns_min_max(schema=clean_schema)
@@ -2521,6 +3581,10 @@ def generate_single_endpoint(
             break
         try:
             payload = _coerce_payload_to_schema(faker.generate(), clean_schema)
+            valid, reason = _validate_payload(payload, clean_schema)
+            if not valid:
+                logger.debug(f"Пропуск JSF-добора: {reason}")
+                continue
             fill_key = f"__field_fill__:{','.join(sorted(missing))}"
             final_payloads.append(PayloadCoverage(payload, [fill_key]))
             covered_fields.update(get_payload_fields(payload))
@@ -2567,6 +3631,7 @@ def generate_single_endpoint(
         request_schema=clean_schema,
         ollama=ollama,
         expected_coverage=expected_coverage,
+        env_file=env_file,
     )
 
     logger.info(
@@ -2585,6 +3650,7 @@ def _generate_endpoint_task(job: dict) -> _EndpointTaskResult:
             job["interface_inventory"],
             compact_coverage=job["compact_coverage"],
             ollama=ollama,
+            env_file=job.get("env_file"),
         )
         return _EndpointTaskResult(endpoint, log_buffer)
     except Exception as exc:
@@ -2625,8 +3691,17 @@ def main(argv: list[str] | None = None):
         data = json.load(file)
 
     post_endpoints = discover_post_endpoints(data)
-    endpoints = resolve_target_endpoints(args.endpoint, post_endpoints)
-    if args.endpoint:
+    endpoints = resolve_run_endpoints(
+        requested=args.endpoint,
+        dir_prefixes=args.dir,
+        all_endpoints=post_endpoints,
+    )
+    if args.dir:
+        logger.info(
+            f"Префикс(ы): {', '.join(_normalize_prefix(p) for p in args.dir)} "
+            f"→ {len(endpoints)} эндпоинтов"
+        )
+    elif args.endpoint:
         logger.info(f"Выбрано эндпоинтов: {len(endpoints)}")
     else:
         logger.info(f"Все POST-эндпоинты из openapi.json: {len(endpoints)}")
@@ -2652,6 +3727,7 @@ def main(argv: list[str] | None = None):
                     "use_ollama": args.ollama,
                     "ollama_features": args.ollama_features,
                     "verbose": args.verbose,
+                    "env_file": env_vars,
                 }
                 for target_endpoint in endpoints
             ]
@@ -2674,6 +3750,7 @@ def main(argv: list[str] | None = None):
                         interface_inventory,
                         compact_coverage=args.compact_coverage,
                         ollama=ollama,
+                        env_file=env_vars,
                     )
                 except Exception as e:
                     logger.critical(f"Критическая ошибка в main: {e}", exc_info=True)
@@ -2683,4 +3760,8 @@ def main(argv: list[str] | None = None):
 
 
 if __name__ == "__main__":
-    main() # Запускаем главную функцию
+    try:
+        main() # Запускаем главную функцию
+    except Exception as e:
+        logger.critical(f"Критическая ошибка в main: {e}", exc_info=True)
+        raise SystemExit(1)

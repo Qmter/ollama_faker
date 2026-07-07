@@ -63845,8 +63845,8 @@
         "description": "aging time in seconds",
         "type": "number",
         "multipleOf": 3.75,
-        "minValue": 0,
-        "maxValue": 956.25
+        "minimum": 0,
+        "maximum": 956.25
       },
       "switchport_vlan": {
         "description": "VLAN for switchport",

@@ -1,6 +1,54 @@
 {
   "field_mappings": {
+    "primary_interface": {
+      "optional": true,
+      "setup": [
+        {
+        "endpoint": "/interfaces/bonding/capability",
+        "method": "POST",
+        "payload": {
+          "ifname": "{{ifname}}",
+          "capability": {
+            "enslave": ["{{primary_interface}}"]
+          }
+        },
+        "note": "Enslave primary interface before setting bond mode"
+        }
+      ],
+      "teardown": 
+      {
+        "endpoint": "/interfaces/bonding/capability",
+        "method": "POST",
+        "payload": {
+          "ifname": "{{ifname}}",
+          "capability": {
+            "enslave": []
+          }
+        },
+        "note": "Enslave primary interface before setting bond mode"
+        }
+    },
+    "pool_number": {
+      "setup": {
+        "endpoint": "/dhcp/ipv4/pools/add",
+        "method": "POST",
+        "payload": {
+          "pool_number": "{{pool_number}}",
+          "network": "1.1.1.0/24"
+        },
+        "extract_to_variable": "created_pool",
+        "response_extract": "data.pool_number"
+      },
+      "teardown": {
+        "endpoint": "/dhcp/ipv4/pools/delete",
+        "method": "POST",
+        "payload": {
+          "pool_number": "{{created_pool}}"
+        }
+      }
+    },
     "vrf_name": {
+      "teardown_priority": 100,
       "setup": {
         "endpoint": "/vrf",
         "method": "POST",
@@ -23,6 +71,7 @@
       "optional": true
     },
     "vrf": {
+      "teardown_priority": 100,
       "setup": {
         "endpoint": "/vrf",
         "method": "POST",
@@ -79,6 +128,103 @@
     }
   },
   "endpoint_rules": {
+    "/interfaces/common/noipv6_address": {
+      "bind_fields": ["ifname", "ipv6_addr"],
+      "setup": {
+        "endpoint": "/interfaces/common/ipv6_address",
+        "method": "POST",
+        "payload": {
+          "ifname": "{{ifname}}",
+          "ipv6_addr": "{{ipv6_addr}}"
+        }
+      },
+      "teardown": {
+        "endpoint": "/interfaces/common/noipv6_address",
+        "method": "POST",
+        "payload": {
+          "ifname": "{{ifname}}",
+          "ipv6_addr": "{{ipv6_addr}}"
+        },
+        "note": "Cleanup created ip_address"
+      }
+    },
+    "/interfaces/common/noip_address": {
+      "bind_fields": ["ifname", "ip_addr"],
+      "setup": {
+        "endpoint": "/interfaces/common/ip_address",
+        "method": "POST",
+        "payload": {
+          "ifname": "{{ifname}}",
+          "ip_addr": "{{ip_addr}}"
+        }
+      },
+      "teardown": {
+        "endpoint": "/interfaces/common/noip_address",
+        "method": "POST",
+        "payload": {
+          "ifname": "{{ifname}}",
+          "ip_addr": "{{ip_addr}}"
+        },
+        "note": "Cleanup created ip_address"
+      }
+    },
+    "/interfaces/switchport/mac_address_table_static": {
+      "bind_fields": ["mac_addr", "ifnames", "vlan"],
+      "add": {
+        "teardown": {
+          "endpoint": "/interfaces/switchport/mac_address_table_static",
+          "method": "POST",
+          "payload": {
+            "ifnames": "{{ifnames}}",
+            "action": {
+              "delete": {
+                "mac_addr": "{{mac_addr}}",
+                "vlan": "{{vlan}}"
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "setup": {
+          "endpoint": "/interfaces/switchport/mac_address_table_static",
+          "method": "POST",
+          "payload": {
+            "ifnames": "{{ifnames}}",
+            "action": {
+              "add": {
+                "mac_addr": "{{mac_addr}}",
+                "vlan": "{{vlan}}"
+              }
+            }
+          },
+          "note": "Создать запись перед delete-тестом"
+        }
+      }
+    },
+    "/interfaces/switchport/vlandb": {
+      "bind_fields": ["vlan"],
+      "add": {
+        "teardown": {
+          "endpoint": "/interfaces/switchport/vlandb",
+          "method": "POST",
+          "payload": {
+            "action": "delete",
+            "vlan": "{{vlan}}"
+          }
+        }
+      },
+      "delete": {
+        "setup": {
+          "endpoint": "/interfaces/switchport/vlandb",
+          "method": "POST",
+          "payload": {
+            "action": "add",
+            "vlan": "{{vlan}}"
+          }
+        }
+    }
+  },
     "/acl/filter/filter_ipv4": {
       "bind_fields": ["vrf", "chain", "acl_name"],
       "add": {
@@ -203,6 +349,18 @@
     "ifname": {
       "rules": [
         {
+          "pattern": "^([0-9]|[1-5][0-9]|6[0-3])([\\-]([0-9]|[1-5][0-9]|6[0-3]))?([\\,]([0-9]|[1-5][0-9]|6[0-3])([\\-]([0-9]|[1-5][0-9]|6[0-3]))?)*$",
+          "env": "DSCP_LIST"
+        },
+        {
+          "pattern": "^([0-7])([\\-]([0-7]))?([\\,]([0-7])([\\-]([0-7]))?)*$",
+          "env": "FPRI_LIST"
+        },
+        {
+          "pattern": "^([1-9][0-9]{0,3}([\\-][1-9][0-9]{0,3})?)([\\,][1-9][0-9]{0,3}([\\-][1-9][0-9]{0,3})?)*$",
+          "env": "VID_RANGE"
+        },
+        {
           "pattern": "^((eth(0|[1-9][0-9]{0,3})\\.(0|[1-9][0-9]{0,3}))|(vlan([0-9]|[1-9][0-9]{1,2}|[1-3][0-9]{3}|40[0-8][0-9]|409[0-5]))|([A-Za-uw-z][A-Za-z0-9_\\-]{0,30}[A-Za-z](0|[1-9][0-9]{0,3})))$",
           "env": "DEVICE_IFNAMES"
         },
@@ -210,8 +368,27 @@
         {
           "pattern": "^eth(0|[1-9][0-9]{0,3})([\\.](0|[1-9][0-9]{0,3}))$",
           "env": "DEVICE_ETH_VLAN_IFNAMES",
-          "create": "/interfaces/eth_vlan/add",
-          "delete": "/interfaces/eth_vlan/delete"
+          "teardown_priority": 11,
+          "setup": {
+            "endpoint": "/interfaces/eth_vlan/add",
+            "method": "POST",
+            "payload": {
+              "ifname": "{{ifname}}",
+              "vid": "{{vid}}"
+            },
+            "extract_to_variable": "created_ifname_eth_vlan",
+            "response_extract": "data.ifname"
+          },
+          "teardown": [
+            {
+            "endpoint": "/interfaces/eth_vlan/delete",
+            "method": "POST",
+            "payload": {
+              "ifname": "{{ifname}}"
+            },
+            "note": "Cleanup created ifname_eth_vlan"
+          }
+          ]
         },
         {
           "pattern": "^eth(0|[1-9][0-9]{0,3})$",
@@ -238,38 +415,150 @@
         {
           "pattern": "^switchport[1-8]$",
           "env": "DEVICE_SWITCHPORT_IFNAMES",
-          "teardown": {
-            "endpoint": "/interfaces/common/reset_interface",
+          "requirements": ["setup", "teardown"],
+          "setup":
+            {
+              "endpoint": "/interfaces/switchport/storm_control_counters",
+              "method": "POST",
+              "payload": {
+                "ifname": "{{ifname}}",
+                "unknown_multicast": {
+                  "action": "start",
+                  "rates": {
+                    "min_rate": 306,
+                    "max_rate": "unlimited"
+                  }
+                },
+                "unknown_broadcast": {
+                  "action": "start",
+                  "rates": {
+                    "min_rate": 306,
+                    "max_rate": "unlimited"
+                  }
+                },
+                "known_broadcast_multicast": {
+                  "action": "start",
+                  "rates": {
+                    "min_rate": 306,
+                    "max_rate": "unlimited"
+                  }
+                },
+                "arp": {
+                  "action": "start",
+                  "rates": {
+                    "min_rate": 306,
+                    "max_rate": "unlimited"
+                  }
+                }
+              }
+              },
+          "teardown": [
+            {
+              "endpoint": "/interfaces/switchport/storm_control_counters",
+              "method": "POST",
+              "payload": {
+                "ifname": "{{ifname}}",
+                "unknown_multicast": {
+                  "action": "stop"
+                },
+                "unknown_broadcast": {
+                  "action": "stop"
+                },
+                "known_broadcast_multicast": {
+                  "action": "stop"
+                },
+                "arp": {
+                  "action": "stop"
+                }
+              }
+              },
+            {
+            "endpoint": "/interfaces/switchport/capability",
             "method": "POST",
             "payload": {
-              "ifname": "{{ifname}}"
+              "port": [
+                {
+                  "ifname": "{{ifname}}",
+                  "autonegotiation": {
+                    "on": true
+                  },
+                  "mtu": 10240,
+                  "igmp_snooping": false,
+                  "port_security": false,
+                  "mac_address_table_learn_limit": null
+                }
+              ],
+              "cpu": {
+                "mac_address_table_learn_limit": null
+              },
+              "mac_address_table_aging_time": null,
+              "dhcp_snooping": {
+                "mode": false
+              },
+              "voicevlan": null,
+              "igmp_snooping": false
             },
-            "note": "Reset switchport to defaults"
+            "note": "Reset switchport capability to defaults"
+          },
+          {
+            "endpoint": "/interfaces/switchport/mode",
+            "method": "POST",
+            "payload": {
+              "ifname": "{{ifname}}",
+              "settings": {
+                "mode": "access",
+                "vlan": "untagged"
+              }
+            },
+            "note": "Reset switchport mode to defaults"
           }
-        },
+      ]},
         {
           "prefix": "bond",
+          "setup_defer": true,
+          "teardown_priority": 10,
           "create": "/interfaces/bonding/add",
           "delete": "/interfaces/bonding/delete"
         },
         {
           "prefix": "lo",
+          "teardown_priority": 10,
           "create": "/interfaces/loopback/add",
           "delete": "/interfaces/loopback/delete"
         },
         {
           "prefix": "br",
+          "teardown_priority": 10,
           "create": "/interfaces/bridge/add",
           "delete": "/interfaces/bridge/delete"
         },
         {
           "prefix": "vlan",
+          "teardown_priority": 11,
           "env": "DEVICE_VLAN_IFNAMES",
-          "create": "/interfaces/vlan/add",
-          "delete": "/interfaces/vlan/delete"
+          "setup": {
+            "endpoint": "/interfaces/vlan/add",
+            "method": "POST",
+            "payload": {
+              "ifname": "{{ifname}}",
+              "vid": "{{vid}}"
+            },
+            "extract_to_variable": "created_ifname_vlan",
+            "response_extract": "data.ifname"
+          },
+          "teardown": [
+            {
+            "endpoint": "/interfaces/vlan/delete",
+            "method": "POST",
+            "payload": {
+              "ifname": "{{ifname}}"
+            }
+          }
+          ]
         },
         {
           "prefix": "tunnel",
+          "teardown_priority": 10,
           "setup": {
             "endpoint": "/interfaces/tunnel/add",
             "method": "POST",
@@ -294,6 +583,19 @@
           ]
         }
       ]
+    }
+  },
+  "mock_data": {
+    "by_schema": {
+      "IP_ADDR": ["10.0.0.1", "10.0.0.2", "10.0.0.3"],
+      "IP_ADDR_WITH_BIT_MASK": ["10.0.0.1/24", "10.0.0.2/24", "10.0.0.3/24"],
+      "IPV6_ADDR": ["2001:db8::1", "2001:db8::2"],
+      "IPV6_ADDR_WITH_BIT_MASK": ["2001:db8:1::1/64", "2001:db8:2::1/64"]
+    },
+    "by_field": {
+      "vrf_name": ["test_vrf_1", "test_vrf_2"],
+      "vrf": ["test_vrf_1", "test_vrf_2"],
+      "acl_name": ["test_acl_1"]
     }
   }
 }
