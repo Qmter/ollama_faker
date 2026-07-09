@@ -94,6 +94,25 @@ class MinimalPayloadTests(unittest.TestCase):
         self.assertTrue(ok, msg)
         self.assertTrue(_is_valid_for_schema(payload, schema))
 
+    def test_minimal_payload_ifname_oneof_enum(self):
+        """type:string + oneOf[enum] не должен давать ifname: {}."""
+        schema = {
+            "type": "object",
+            "required": ["ifname"],
+            "properties": {
+                "ifname": {
+                    "type": "string",
+                    "oneOf": [
+                        {"type": "string", "enum": ["vlan100", "vlan200"]},
+                    ],
+                },
+            },
+            "additionalProperties": False,
+        }
+        payload = build_minimal_payload(schema)
+        self.assertIsInstance(payload["ifname"], str)
+        self.assertEqual(payload["ifname"], "vlan100")
+
 
 if __name__ == "__main__":
     unittest.main()

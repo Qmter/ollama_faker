@@ -94,6 +94,7 @@ def configure_logging(*, verbose: bool, log_file: str) -> None:
         level=level,
         format=_LOG_FORMAT,
         force=True,
+        encoding="utf-8",
     )
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     logging.getLogger("requests").setLevel(logging.WARNING)
@@ -942,11 +943,6 @@ def main(argv: list[str] | None = None) -> int:
 
         for scenario in scenarios:
             global_scenario_index += 1
-            print(
-                f"[{global_scenario_index}/{global_scenario_total}] "
-                f"{endpoint} #{scenario.get('test_id', '?')}",
-                flush=True,
-            )
 
             scenario_result = _run_scenario(
                 scenario=scenario,
@@ -967,16 +963,21 @@ def main(argv: list[str] | None = None) -> int:
             summary.passed_steps += sum(1 for s in scenario_result.steps if s.passed)
             summary.failed_steps += sum(1 for s in scenario_result.steps if not s.passed)
 
+            status_label = "PASS" if scenario_result.passed else "FAIL"
+            print(
+                f"[{global_scenario_index}/{global_scenario_total}] "
+                f"{endpoint} #{scenario.get('test_id', '?')}  {status_label}",
+                flush=True,
+            )
+
             if scenario_result.passed:
                 summary.passed_scenarios += 1
                 endpoint_passed += 1
-                print(f"  PASS", flush=True)
             else:
                 summary.failed_scenarios += 1
                 endpoint_failed += 1
                 endpoint_failed_test_ids.append(scenario_result.test_id)
                 exit_code = 1
-                print(f"  FAIL", flush=True)
                 if args.stop_on_failure:
                     logger.error("Остановка по --stop-on-failure")
                     _log_endpoint_block_end(

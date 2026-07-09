@@ -9,7 +9,6 @@ from pathlib import Path
 from main import (
     PayloadCoverage,
     build_test_scenarios,
-    synchronize_vid_ifname,
 )
 from ollama_orchestrator import OllamaOrchestrator
 
@@ -174,6 +173,73 @@ class BuildTestScenariosTests(unittest.TestCase):
                 self.assertEqual(len(vlandb_steps), 2)
                 for step in vlandb_steps:
                     self.assertEqual(step["payload"]["vlan"], "4092")
+            finally:
+                os.chdir(prev)
+
+    def test_common_arp_main_test_has_no_spurious_vid(self):
+        """main_test без vid в схеме не должен получать vid из synchronize_vid_ifname."""
+        ollama = OllamaOrchestrator.from_cli(False)
+        deps = {
+            "field_mappings": {},
+            "interface_rules": {
+                "ifname": {
+                    "rules": [
+                        {
+                            "prefix": "vlan",
+                            "setup": {
+                                "endpoint": "/interfaces/vlan/add",
+                                "payload": {"ifname": "{{ifname}}", "vid": "{{vid}}"},
+                            },
+                            "teardown": {
+                                "endpoint": "/interfaces/vlan/delete",
+                                "payload": {"ifname": "{{ifname}}"},
+                            },
+                        },
+                    ],
+                },
+            },
+            "endpoint_rules": {},
+        }
+        records = [
+            PayloadCoverage(
+                {"ifname": "vlan100", "announce": "any"},
+                ['announce="any"'],
+            ),
+        ]
+        schema = {
+            "type": "object",
+            "required": ["ifname"],
+            "properties": {
+                "ifname": {"type": "string", "enum": ["vlan100"]},
+                "announce": {"type": "string", "enum": ["any", "best"]},
+            },
+            "additionalProperties": False,
+        }
+        with tempfile.TemporaryDirectory() as td:
+            prev = os.getcwd()
+            os.chdir(td)
+            try:
+                build_test_scenarios(
+                    "/interfaces/common/arp",
+                    "post",
+                    records,
+                    deps,
+                    request_schema=schema,
+                    ollama=ollama,
+                )
+                scenario = json.loads(
+                    Path("tests/interfaces_common_arp_post.json").read_text(
+                        encoding="utf-8",
+                    ),
+                )[0]
+                main_payload = scenario["main_test"]["payload"]
+                self.assertNotIn("vid", main_payload)
+                self.assertEqual(main_payload["announce"], "any")
+                setup_vlan = next(
+                    s for s in scenario["setup"]
+                    if s["endpoint"] == "/interfaces/vlan/add"
+                )
+                self.assertEqual(setup_vlan["payload"]["vid"], 100)
             finally:
                 os.chdir(prev)
 

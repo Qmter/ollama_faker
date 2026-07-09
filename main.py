@@ -51,6 +51,7 @@ def configure_logging(debug: bool = False, *, filemode: str = "w") -> None:
         format=_LOG_FORMAT,
         datefmt=_LOG_DATE_FORMAT,
         force=True,
+        encoding="utf-8",
     )
 
 
@@ -611,6 +612,9 @@ def _minimal_prop_value(prop_schema: dict):
         return _minimal_object_composed(prop_schema)
     if _resolve_schema_type(prop_schema) == 'array':
         return _generate_array_value(prop_schema)
+    concrete = _first_concrete_value(prop_schema)
+    if concrete is not None:
+        return concrete
     try:
         return _jsf_generate(prop_schema)
     except Exception:
@@ -2210,14 +2214,38 @@ def _infer_vid_from_ifname(ifname: str) -> int | None:
     return None
 
 
-def _synchronize_vid_ifname_inplace(obj) -> None:
+def _schema_declares_property(schema: dict | None, prop_name: str) -> bool:
+    """Есть ли prop_name в properties схемы (включая ветки oneOf/anyOf/allOf)."""
+    if not isinstance(schema, dict):
+        return False
+    if prop_name in schema.get("properties", {}):
+        return True
+    for branch in _iter_schema_branches(schema):
+        if _schema_declares_property(branch, prop_name):
+            return True
+    return False
+
+
+def _should_sync_vid_at_node(obj: dict, schema: dict | None) -> bool:
+    """Синхронизировать vid только если поле уже в payload или объявлено в схеме."""
+    if "vid" in obj:
+        return True
+    return _schema_declares_property(schema, "vid")
+
+
+def _synchronize_vid_ifname_inplace(obj, schema: dict | None = None) -> None:
     """
     Согласует vid с ifname в дереве payload.
     vlan4092 ↔ vid 4092, eth1.200 ↔ vid 200 — иначе vlandb teardown не совпадает с main_test.
+    vid добавляется/меняется только на узлах, где vid уже есть или объявлен в схеме.
     """
     if isinstance(obj, dict):
         ifname = obj.get("ifname")
-        if isinstance(ifname, str) and (inferred := _infer_vid_from_ifname(ifname)) is not None:
+        if (
+            isinstance(ifname, str)
+            and _should_sync_vid_at_node(obj, schema)
+            and (inferred := _infer_vid_from_ifname(ifname)) is not None
+        ):
             if obj.get("vid") != inferred:
                 logger.debug(
                     "sync vid: %s → %s (ifname=%s)",
@@ -2226,17 +2254,24 @@ def _synchronize_vid_ifname_inplace(obj) -> None:
                     ifname,
                 )
             obj["vid"] = inferred
-        for value in obj.values():
-            _synchronize_vid_ifname_inplace(value)
+        props = schema.get("properties", {}) if isinstance(schema, dict) else {}
+        for key, value in obj.items():
+            child_schema = props.get(key) if isinstance(props.get(key), dict) else None
+            _synchronize_vid_ifname_inplace(value, child_schema)
     elif isinstance(obj, list):
+        item_schema = None
+        if isinstance(schema, dict) and _resolve_schema_type(schema) == "array":
+            items = schema.get("items")
+            if isinstance(items, dict):
+                item_schema = items
         for item in obj:
-            _synchronize_vid_ifname_inplace(item)
+            _synchronize_vid_ifname_inplace(item, item_schema)
 
 
-def synchronize_vid_ifname(payload: dict) -> dict:
-    """Копия payload с согласованными vid/ifname."""
+def synchronize_vid_ifname(payload: dict, schema: dict | None = None) -> dict:
+    """Копия payload с согласованными vid/ifname (только где vid уместен по схеме)."""
     result = copy.deepcopy(payload)
-    _synchronize_vid_ifname_inplace(result)
+    _synchronize_vid_ifname_inplace(result, schema)
     return result
 
 
@@ -2974,7 +3009,7 @@ def apply_mock_data(
 ) -> dict:
     """
     Подменяет pattern → enum для mock-значений из dependencies.json.
-    Не перезаписывает уже заданный enum (инвентарь интерфейсов и т.п.).
+    by_field и by_schema имеют приоритет над enum из инвентаря интерфейсов.
     """
     if not mock_config:
         return schema
@@ -2987,19 +3022,17 @@ def apply_mock_data(
         if not isinstance(obj, dict):
             return
 
-        if not obj.get("enum"):
-            pattern = obj.get("pattern")
-            if pattern and pattern in pattern_index:
-                obj["enum"] = list(pattern_index[pattern])
-                logger.debug(
-                    f"mock_data by_schema (pattern): {pattern_index[pattern]}"
-                )
+        pattern = obj.get("pattern")
+        if pattern and pattern in pattern_index:
+            obj["enum"] = list(pattern_index[pattern])
+            logger.debug(
+                f"mock_data by_schema (pattern): {pattern_index[pattern]}"
+            )
 
         for prop_name, prop_schema in obj.get("properties", {}).items():
             if (
                 prop_name in by_field
                 and isinstance(prop_schema, dict)
-                and not prop_schema.get("enum")
                 and not _schema_has_composition(prop_schema)
             ):
                 prop_schema["enum"] = list(by_field[prop_name])
@@ -3257,7 +3290,7 @@ def build_test_scenarios(
     env_file = env_file or {}
 
     for record in payload_records:
-        payload = synchronize_vid_ifname(record.payload)
+        payload = synchronize_vid_ifname(record.payload, request_schema)
         main_payload = copy.deepcopy(payload)
         variables = {_PLACEHOLDER_CONTEXT_KEY: copy.deepcopy(payload)}
 

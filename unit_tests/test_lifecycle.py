@@ -238,6 +238,32 @@ class VidResolutionTests(unittest.TestCase):
         synced = synchronize_vid_ifname({"ifname": "eth1.200", "vid": 999})
         self.assertEqual(synced["vid"], 200)
 
+    def test_synchronize_vid_ifname_skips_vid_without_schema(self):
+        """Эндпоинты без vid в схеме (напр. /interfaces/common/arp) не получают лишний vid."""
+        arp_schema = {
+            "type": "object",
+            "required": ["ifname"],
+            "properties": {
+                "ifname": {"type": "string", "enum": ["vlan100"]},
+                "announce": {"type": "string", "enum": ["any"]},
+            },
+            "additionalProperties": False,
+        }
+        synced = synchronize_vid_ifname({"ifname": "vlan100", "announce": "any"}, arp_schema)
+        self.assertNotIn("vid", synced)
+
+    def test_synchronize_vid_ifname_adds_vid_when_schema_declares_it(self):
+        vlan_schema = {
+            "type": "object",
+            "required": ["ifname", "vid"],
+            "properties": {
+                "ifname": {"type": "string", "enum": ["vlan4092"]},
+                "vid": {"type": "integer"},
+            },
+        }
+        synced = synchronize_vid_ifname({"ifname": "vlan4092", "vid": 1926}, vlan_schema)
+        self.assertEqual(synced["vid"], 4092)
+
     def test_lifecycle_vars_prefer_synced_context_vid(self):
         ctx = {"ifname": "vlan4092", "vid": 4092}
         result = _lifecycle_vars(

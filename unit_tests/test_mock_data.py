@@ -61,7 +61,7 @@ class ApplyMockDataTests(unittest.TestCase):
         result = apply_mock_data(schema, mock_config, {})
         self.assertEqual(result["properties"]["vrf_name"]["enum"], ["autotest-vrf-1"])
 
-    def test_does_not_override_existing_enum(self):
+    def test_by_field_overrides_existing_enum(self):
         mock_config = parse_mock_data_config({
             "mock_data": {"by_field": {"ifname": ["eth99"]}},
         })
@@ -72,28 +72,35 @@ class ApplyMockDataTests(unittest.TestCase):
             },
         }
         result = apply_mock_data(schema, mock_config, {})
-        self.assertEqual(result["properties"]["ifname"]["enum"], ["eth1"])
+        self.assertEqual(result["properties"]["ifname"]["enum"], ["eth99"])
 
-    def test_inventory_enum_preserved_when_mock_runs_after(self):
+    def test_by_field_overrides_interface_inventory(self):
         inventory = [{
-            "pattern": r"^eth(0|[1-9][0-9]{0,3})$",
-            "names": ["eth1"],
+            "names": ["vlan100", "vlan200"],
+            "prefix": "vlan",
         }]
         schema = {
             "type": "object",
             "properties": {
-                "ifname": {
+                "vrf_name": {
                     "type": "string",
-                    "pattern": r"^eth(0|[1-9][0-9]{0,3})$",
+                    "pattern": "^[A-Za-z0-9_-]{1,12}$",
                 },
             },
         }
         with_inventory = apply_interface_inventory(schema, inventory)
+        self.assertEqual(
+            with_inventory["properties"]["vrf_name"]["enum"],
+            ["vlan100", "vlan200"],
+        )
         mock_config = parse_mock_data_config({
-            "mock_data": {"by_field": {"ifname": ["eth99"]}},
+            "mock_data": {"by_field": {"vrf_name": ["test_vrf_1", "test_vrf_2"]}},
         })
         result = apply_mock_data(with_inventory, mock_config, {})
-        self.assertEqual(result["properties"]["ifname"]["enum"], ["eth1"])
+        self.assertEqual(
+            result["properties"]["vrf_name"]["enum"],
+            ["test_vrf_1", "test_vrf_2"],
+        )
 
     def test_collect_test_values_uses_mock_enum(self):
         ip_pattern = (
