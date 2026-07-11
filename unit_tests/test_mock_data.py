@@ -75,9 +75,15 @@ class ApplyMockDataTests(unittest.TestCase):
         self.assertEqual(result["properties"]["ifname"]["enum"], ["eth99"])
 
     def test_by_field_overrides_interface_inventory(self):
+        ifname_pattern = (
+            r"^((eth(0|[1-9][0-9]{0,3})\\.(0|[1-9][0-9]{0,3}))"
+            r"|(vlan([0-9]|[1-9][0-9]{1,2}|[1-3][0-9]{3}|40[0-8][0-9]|409[0-5]))"
+            r"|([A-Za-uw-z][A-Za-z0-9_\\-]{0,30}[A-Za-z](0|[1-9][0-9]{0,3})))$"
+        )
         inventory = [{
             "names": ["vlan100", "vlan200"],
             "prefix": "vlan",
+            "schema_patterns": [ifname_pattern],
         }]
         schema = {
             "type": "object",
@@ -86,11 +92,16 @@ class ApplyMockDataTests(unittest.TestCase):
                     "type": "string",
                     "pattern": "^[A-Za-z0-9_-]{1,12}$",
                 },
+                "ifname": {
+                    "type": "string",
+                    "pattern": ifname_pattern,
+                },
             },
         }
         with_inventory = apply_interface_inventory(schema, inventory)
+        self.assertNotIn("enum", with_inventory["properties"]["vrf_name"])
         self.assertEqual(
-            with_inventory["properties"]["vrf_name"]["enum"],
+            with_inventory["properties"]["ifname"]["enum"],
             ["vlan100", "vlan200"],
         )
         mock_config = parse_mock_data_config({

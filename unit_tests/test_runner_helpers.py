@@ -8,14 +8,30 @@ from run_tests import (
     _is_already_exists_error,
     _resolve_base_url,
     _response_text,
-    endpoint_to_test_file,
 )
+from test_paths import endpoint_to_test_file
 
 
 class EndpointToFileTests(unittest.TestCase):
-    def test_maps_endpoint_to_filename(self):
+    def test_maps_endpoint_to_block_subdirectory(self):
         path = endpoint_to_test_file("/interfaces/bonding/mode", Path("tests"))
-        self.assertEqual(path.name, "interfaces_bonding_mode_post.json")
+        self.assertEqual(path, Path("tests/interfaces/interfaces_bonding_mode_post.json"))
+
+    def test_maps_acl_endpoint(self):
+        path = endpoint_to_test_file("/acl/acl_ipv4", Path("tests"))
+        self.assertEqual(path, Path("tests/acl/acl_acl_ipv4_post.json"))
+
+    def test_maps_nested_acl_endpoint(self):
+        path = endpoint_to_test_file("/acl/filter/filter_ipv4", Path("tests"))
+        self.assertEqual(path, Path("tests/acl/acl_filter_filter_ipv4_post.json"))
+
+    def test_maps_fail2ban_endpoint(self):
+        path = endpoint_to_test_file("/fail2ban/jail/add", Path("tests"))
+        self.assertEqual(path, Path("tests/fail2ban/fail2ban_jail_add_post.json"))
+
+    def test_single_segment_stays_in_tests_root(self):
+        path = endpoint_to_test_file("/health", Path("tests"))
+        self.assertEqual(path, Path("tests/health_post.json"))
 
 
 class BaseUrlTests(unittest.TestCase):

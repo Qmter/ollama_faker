@@ -13,6 +13,7 @@ from pathlib import Path
 from jsf import JSF
 from ollama_orchestrator import OllamaOrchestrator
 from resolve_scheme import ResolveScheme
+from test_paths import endpoint_to_test_file
 
 # =============================================================================
 # ГЛОБАЛЬНАЯ НАСТРОЙКА ЛОГИРОВАНИЯ
@@ -462,7 +463,7 @@ def _schema_has_composition(schema: dict) -> bool:
 
 _NUMERIC_BOUNDS = ('minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum')
 _STRING_BOUNDS = ('minLength', 'maxLength')
-_VLAN_ID_MIN = 1
+_VLAN_ID_MIN = 2
 _VLAN_ID_MAX = 4094
 _VID_RANGE_LIST_RE = re.compile(
     r"^([1-9][0-9]{0,3}([\-][1-9][0-9]{0,3})?)"
@@ -511,7 +512,7 @@ def _vid_range_list_test_values() -> list[str]:
         "2",
         "45-68",
         "100",
-        "1-10",
+        "2-10",
         "4091",
         "2,45-68,4091",
         "10-20,100",
@@ -1662,11 +1663,11 @@ _TEARDOWN_PRIORITY_PREREQUISITE = 100
 _SETUP_PRIORITY_KEY = "_setup_priority"
 # Меньше → раньше в setup. Явный setup_priority в dependencies.json перекрывает всё ниже.
 _SETUP_PHASE_ORDER: dict[str, int] = {
-    "prerequisite": 10,  # vrf, dhcp pool — другой эндпоинт, чем main_test
-    "interface": 20,       # interface_rules: создание ifname
-    "field": 30,           # field_mappings: enslave, acl, …
-    "endpoint": 40,        # endpoint_rules
-    "auto": 50,            # авто lifecycle (scalar delete setup)
+    "interface": 5,        # создание ifname / slave до bond и enslave
+    "prerequisite": 10,    # vrf, bond add на другом path, enslave capability
+    "field": 30,           # field_mappings (enslave без отдельного endpoint)
+    "endpoint": 40,
+    "auto": 50,
 }
 _SETUP_PRIORITY_DEFAULT = 50
 
@@ -1708,6 +1709,17 @@ def _setup_action_rank(step: dict) -> int:
     return 1
 
 
+def _is_field_mapping_lifecycle_config(config: dict) -> bool:
+    """field_mappings (enslave, vrf, …), не interface_rules (create/delete/prefix)."""
+    if not isinstance(config, dict):
+        return False
+    if config.get("prefix") or config.get("pattern"):
+        return False
+    if isinstance(config.get("create"), str) or isinstance(config.get("delete"), str):
+        return False
+    return bool(config.get("setup") or config.get("teardown"))
+
+
 def _resolve_setup_priority(
     step: dict,
     *,
@@ -1719,7 +1731,13 @@ def _resolve_setup_priority(
         return int(explicit)
     if config and (explicit := config.get("setup_priority")) is not None:
         return int(explicit)
-    if config and target_endpoint and _is_prerequisite_field(config, target_endpoint):
+    if (
+        config
+        and target_endpoint
+        and phase != "interface"
+        and _is_field_mapping_lifecycle_config(config)
+        and _is_prerequisite_field(config, target_endpoint)
+    ):
         phase = "prerequisite"
     phase_base = _SETUP_PHASE_ORDER.get(phase, _SETUP_PRIORITY_DEFAULT)
     return phase_base * 10 + _setup_action_rank(step)
@@ -2729,23 +2747,15 @@ def _normalize_interface_rules(field_rules: dict) -> list:
     return rules
 
 
-def _resolve_auto_interface(field_name, field_value, iface_rules):
+def _resolve_interface_lifecycle_by_value(field_value: str, field_rules: dict):
     """
-    Определяет lifecycle интерфейса по имени.
-    Возвращает:
-      - {"create": "...", "delete": "..."} — setup + delete в teardown
-      - {"setup": {...}, "teardown": {...}} — кастомные шаги
-      - {"teardown": {...}} — только кастомный teardown (reset и т.п.)
-      - {"physical": True} — ничего не делать (legacy)
-      - None — правило не найдено
-
-    teardown/setup в правиле имеют приоритет над delete/create.
-    physical без teardown — полный пропуск lifecycle.
+    Подбирает lifecycle-правило по значению (pattern/prefix).
+    Не зависит от имени JSON-поля.
     """
-    if field_name not in iface_rules or not isinstance(field_value, str):
+    if not isinstance(field_value, str):
         return None
 
-    for rule in _normalize_interface_rules(iface_rules[field_name]):
+    for rule in _normalize_interface_rules(field_rules):
         matched = False
         if "pattern" in rule:
             matched = bool(re.fullmatch(rule["pattern"], field_value))
@@ -2776,6 +2786,278 @@ def _resolve_auto_interface(field_name, field_value, iface_rules):
             return result
 
     return None
+
+
+def _resolve_auto_interface(field_name, field_value, iface_rules):
+    """
+    Определяет lifecycle интерфейса по имени поля и значению.
+    Возвращает:
+      - {"create": "...", "delete": "..."} — setup + delete в teardown
+      - {"setup": {...}, "teardown": {...}} — кастомные шаги
+      - {"teardown": {...}} — только кастомный teardown (reset и т.п.)
+      - {"physical": True} — ничего не делать (legacy)
+      - None — правило не найдено
+
+    teardown/setup в правиле имеют приоритет над delete/create.
+    physical без teardown — полный пропуск lifecycle.
+    """
+    if field_name not in iface_rules or not isinstance(field_value, str):
+        return None
+    return _resolve_interface_lifecycle_by_value(field_value, iface_rules[field_name])
+
+
+def parse_interface_lifecycle_config(dependencies: dict) -> dict | None:
+    """
+    Конфиг schema-driven lifecycle из dependencies.json.
+    По умолчанию: IFNAME → interface_rules.ifname (если секция не задана).
+    enabled: false — только key-based обнаружение (ifname и др. ключи в interface_rules).
+    """
+    raw = dependencies.get("interface_lifecycle")
+    if isinstance(raw, dict) and raw.get("enabled") is False:
+        return None
+
+    if isinstance(raw, dict):
+        schema_components = [
+            name for name in raw.get("schema_components", ["IFNAME"])
+            if isinstance(name, str) and name.strip()
+        ]
+        rules_key = raw.get("rules_key", "ifname")
+    else:
+        schema_components = ["IFNAME"]
+        rules_key = "ifname"
+
+    if not schema_components:
+        return None
+
+    exclude_fields = frozenset(
+        name for name in raw.get("exclude_fields", [])
+        if isinstance(name, str) and name.strip()
+    ) if isinstance(raw, dict) else frozenset()
+
+    return {
+        "schema_components": schema_components,
+        "schema_components_set": frozenset(schema_components),
+        "rules_key": rules_key,
+        "exclude_fields": exclude_fields,
+    }
+
+
+def _schema_ref_component_name(schema: dict) -> str | None:
+    ref = schema.get("$ref") if isinstance(schema, dict) else None
+    if isinstance(ref, str) and ref.startswith("#/components/schemas/"):
+        name = ref.rsplit("/", 1)[-1]
+        return name or None
+    return None
+
+
+def _iter_resolved_schema_branches(schema: dict, components: dict):
+    if not isinstance(schema, dict):
+        return
+    if any(keyword in schema for keyword in ("oneOf", "anyOf", "allOf")):
+        for branch in _iter_schema_branches(schema):
+            if isinstance(branch, dict):
+                yield branch
+        return
+    yield schema
+
+
+def _interface_component_patterns(
+    components: dict,
+    lifecycle_config: dict,
+) -> dict[str, str]:
+    """Имена OpenAPI-компонентов → pattern (для inline-схем после mock/inventory)."""
+    patterns: dict[str, str] = {}
+    schemas = components.get("schemas", {})
+    for name in lifecycle_config.get("schema_components", ()):
+        comp = schemas.get(name)
+        if isinstance(comp, dict) and (pattern := comp.get("pattern")):
+            patterns[name] = pattern
+    return patterns
+
+
+def _branch_interface_component_name(
+    branch: dict,
+    components: dict,
+    lifecycle_config: dict,
+) -> str | None:
+    allowed = lifecycle_config.get("schema_components_set", frozenset())
+    if ref_name := _schema_ref_component_name(branch):
+        return ref_name if ref_name in allowed else None
+
+    resolved = ResolveScheme._resolve_ref(branch, components)
+    if not isinstance(resolved, dict):
+        return None
+    branch_pattern = resolved.get("pattern")
+    if not branch_pattern:
+        return None
+
+    for comp_name, comp_pattern in _interface_component_patterns(
+        components, lifecycle_config,
+    ).items():
+        if branch_pattern == comp_pattern:
+            return comp_name
+    return None
+
+
+def _string_matches_resolved_schema(value: str, schema: dict, components: dict) -> bool:
+    if not isinstance(value, str) or not isinstance(schema, dict):
+        return False
+
+    resolved = ResolveScheme._resolve_ref(schema, components)
+    if not isinstance(resolved, dict):
+        return False
+
+    if "enum" in resolved:
+        return value in resolved["enum"]
+    if "const" in resolved:
+        return value == resolved["const"]
+    if pattern := resolved.get("pattern"):
+        try:
+            return bool(re.fullmatch(pattern, value))
+        except re.error:
+            logger.warning("Некорректный pattern в схеме: %s", pattern)
+            return False
+    return False
+
+
+def _string_matches_interface_lifecycle_branch(
+    value: str,
+    branch: dict,
+    components: dict,
+) -> bool:
+    """
+    Совпадение значения с веткой схемы интерфейса.
+    Enum из инвентаря не блокирует pattern: eth1.1 валиден по pattern,
+    даже если в enum только eth1.2 из .env.
+    """
+    resolved = ResolveScheme._resolve_ref(branch, components)
+    if not isinstance(resolved, dict):
+        return False
+    if "enum" in resolved and value in resolved["enum"]:
+        return True
+    if "const" in resolved and value == resolved["const"]:
+        return True
+    if pattern := resolved.get("pattern"):
+        try:
+            return bool(re.fullmatch(pattern, value))
+        except re.error:
+            logger.warning("Некорректный pattern в схеме: %s", pattern)
+            return False
+    return False
+
+
+def _value_matches_interface_lifecycle_schema(
+    value: str,
+    field_schema: dict,
+    components: dict,
+    lifecycle_config: dict,
+) -> bool:
+    """True, если значение соответствует одной из schema_components (anyOf/oneOf по значению)."""
+    allowed = lifecycle_config.get("schema_components_set", frozenset())
+    if not allowed:
+        return False
+
+    for branch in _iter_resolved_schema_branches(field_schema, components):
+        comp_name = _branch_interface_component_name(branch, components, lifecycle_config)
+        if comp_name not in allowed:
+            continue
+        if _string_matches_interface_lifecycle_branch(value, branch, components):
+            return True
+    return False
+
+
+def _property_schema_for_key(parent_schema: dict | None, key: str) -> dict | None:
+    if not isinstance(parent_schema, dict):
+        return None
+    return _property_schema_in_node(parent_schema, key)
+
+
+def _collect_interface_candidates(
+    obj,
+    iface_rules,
+    candidates: list,
+    *,
+    discovery_index: int = 0,
+    request_schema: dict | None = None,
+    current_schema: dict | None = None,
+    openapi_components: dict | None = None,
+    lifecycle_config: dict | None = None,
+) -> int:
+    """Собирает строки из payload для interface_rules (по ключу и по OpenAPI-схеме)."""
+    if current_schema is None and request_schema is not None:
+        current_schema = request_schema
+
+    rules_key = lifecycle_config.get("rules_key", "ifname") if lifecycle_config else "ifname"
+    rules_for_schema = iface_rules.get(rules_key, {}) if lifecycle_config else None
+    skip_schema_keys = lifecycle_config.get("skip_field_keys", frozenset()) if lifecycle_config else frozenset()
+
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            child_schema = _property_schema_for_key(current_schema, key)
+            if isinstance(value, str):
+                if key in _SKIP_INTERFACE_VALUE_KEYS:
+                    continue
+                if key in iface_rules and _resolve_auto_interface(key, value, iface_rules):
+                    candidates.append((discovery_index, key, value))
+                    discovery_index += 1
+                elif (
+                    lifecycle_config
+                    and rules_for_schema is not None
+                    and key not in iface_rules
+                    and key not in skip_schema_keys
+                    and child_schema is not None
+                    and openapi_components
+                    and _value_matches_interface_lifecycle_schema(
+                        value, child_schema, openapi_components, lifecycle_config,
+                    )
+                    and _resolve_interface_lifecycle_by_value(value, rules_for_schema)
+                ):
+                    candidates.append((discovery_index, rules_key, value))
+                    discovery_index += 1
+            else:
+                discovery_index = _collect_interface_candidates(
+                    value, iface_rules, candidates,
+                    discovery_index=discovery_index,
+                    request_schema=request_schema,
+                    current_schema=child_schema,
+                    openapi_components=openapi_components,
+                    lifecycle_config=lifecycle_config,
+                )
+    elif isinstance(obj, list):
+        item_schema = None
+        if isinstance(current_schema, dict) and _resolve_schema_type(current_schema) == "array":
+            items = current_schema.get("items")
+            if isinstance(items, dict):
+                item_schema = items
+        for item in obj:
+            if isinstance(item, str):
+                if "ifname" in iface_rules and _resolve_auto_interface(
+                    "ifname", item, iface_rules,
+                ):
+                    candidates.append((discovery_index, "ifname", item))
+                    discovery_index += 1
+                elif (
+                    lifecycle_config
+                    and rules_for_schema is not None
+                    and item_schema is not None
+                    and openapi_components
+                    and _value_matches_interface_lifecycle_schema(
+                        item, item_schema, openapi_components, lifecycle_config,
+                    )
+                    and _resolve_interface_lifecycle_by_value(item, rules_for_schema)
+                ):
+                    candidates.append((discovery_index, rules_key, item))
+                    discovery_index += 1
+            else:
+                discovery_index = _collect_interface_candidates(
+                    item, iface_rules, candidates,
+                    discovery_index=discovery_index,
+                    request_schema=request_schema,
+                    current_schema=item_schema,
+                    openapi_components=openapi_components,
+                    lifecycle_config=lifecycle_config,
+                )
+    return discovery_index
 
 
 # =============================================================================
@@ -2819,6 +3101,16 @@ def _resolve_allowed_names(rule: dict, env_file: dict) -> list | None:
     return list(dict.fromkeys(allowed)) # Возвращаем список имён
 
 
+def _collect_interface_schema_patterns(iface_rules: dict) -> frozenset[str]:
+    """OpenAPI pattern'ы из interface_rules — только к ним применяется prefix-инвентарь."""
+    patterns: set[str] = set()
+    for field_rules in iface_rules.values():
+        for rule in _normalize_interface_rules(field_rules):
+            if pattern := rule.get("pattern"):
+                patterns.add(pattern)
+    return frozenset(patterns)
+
+
 def build_interface_inventory(dependencies: dict, env_file: dict | None = None) -> list:
     """
     Собирает инвентарь из interface_rules (pattern или prefix + env/allowed).
@@ -2827,6 +3119,7 @@ def build_interface_inventory(dependencies: dict, env_file: dict | None = None) 
     env_file = env_file or {} 
     entries = [] # Список интерфейсов
     iface_rules = dependencies.get("interface_rules", {}) # Правила интерфейсов
+    interface_schema_patterns = _collect_interface_schema_patterns(iface_rules)
 
     for field_rules in iface_rules.values(): # Для каждого правила интерфейса
         for rule in _normalize_interface_rules(field_rules): # Нормализуем правила интерфейса
@@ -2839,6 +3132,8 @@ def build_interface_inventory(dependencies: dict, env_file: dict | None = None) 
                 entry["pattern"] = pattern # Добавляем pattern в запись
             if prefix := rule.get("prefix"): # Если есть prefix
                 entry["prefix"] = prefix # Добавляем prefix в запись
+                if interface_schema_patterns:
+                    entry["schema_patterns"] = sorted(interface_schema_patterns)
             if not entry.get("pattern") and not entry.get("prefix"):
                 continue # Если нет pattern и prefix, пропускаем
 
@@ -2858,10 +3153,10 @@ def _inventory_matches_schema_pattern(entry: dict, schema_pattern: str) -> bool:
         return False
     if not all(_matches_interface_prefix(name, prefix) for name in names):
         return False
-    try:
-        return all(re.fullmatch(schema_pattern, name) for name in names)
-    except re.error:
-        return False
+    allowed = entry.get("schema_patterns")
+    if allowed is not None:
+        return schema_pattern in allowed
+    return False
 
 
 def build_eth_parents_with_vlan_children(inventory: list) -> set[str]:
@@ -2923,6 +3218,7 @@ def apply_interface_inventory(
 # =============================================================================
 # MOCK DATA (dependencies.json → mock_data, опционально)
 # =============================================================================
+_OPENAPI_DEFAULT_PATH = Path(__file__).resolve().parent / "openapi.json"
 _openapi_components_cache: dict | None = None
 
 
@@ -2931,6 +3227,8 @@ def load_openapi_components(path: str = "openapi.json") -> dict:
     global _openapi_components_cache
     if _openapi_components_cache is None:
         openapi_path = Path(path)
+        if not openapi_path.is_file():
+            openapi_path = _OPENAPI_DEFAULT_PATH
         if openapi_path.is_file():
             with open(openapi_path, "r", encoding="utf-8") as f:
                 _openapi_components_cache = json.load(f).get("components", {})
@@ -3133,45 +3431,6 @@ def _interface_setup_sort_key(ifname: str, iface_rules: dict) -> tuple[int, str]
     return (0, ifname)
 
 
-def _collect_interface_candidates(
-    obj,
-    iface_rules,
-    candidates: list,
-    *,
-    discovery_index: int = 0,
-) -> int:
-    """Собирает строки из payload, для которых сработает interface_rules."""
-    if isinstance(obj, dict):
-        for key, value in obj.items():
-            if isinstance(value, str):
-                field_name = key if key in iface_rules else "ifname"
-                if key in iface_rules or key not in _SKIP_INTERFACE_VALUE_KEYS:
-                    if field_name in iface_rules and _resolve_auto_interface(
-                        field_name, value, iface_rules,
-                    ):
-                        candidates.append((discovery_index, field_name, value))
-                        discovery_index += 1
-            else:
-                discovery_index = _collect_interface_candidates(
-                    value, iface_rules, candidates,
-                    discovery_index=discovery_index,
-                )
-    elif isinstance(obj, list):
-        for item in obj:
-            if isinstance(item, str):
-                if "ifname" in iface_rules and _resolve_auto_interface(
-                    "ifname", item, iface_rules,
-                ):
-                    candidates.append((discovery_index, "ifname", item))
-                    discovery_index += 1
-            else:
-                discovery_index = _collect_interface_candidates(
-                    item, iface_rules, candidates,
-                    discovery_index=discovery_index,
-                )
-    return discovery_index
-
-
 def _scan_payload_for_interfaces(
     obj,
     scenario,
@@ -3184,13 +3443,21 @@ def _scan_payload_for_interfaces(
     env_file: dict | None = None,
     vid_pool: _VidPool | None = None,
     endpoint_rules: dict | None = None,
+    request_schema: dict | None = None,
+    lifecycle_config: dict | None = None,
+    openapi_components: dict | None = None,
 ):
     """
     Ищет имена интерфейсов в payload и применяет lifecycle.
     Порядок: сначала не-bond (prefix из dependencies.json), затем bond.
     """
     candidates: list[tuple[int, str, str]] = []
-    _collect_interface_candidates(obj, iface_rules, candidates)
+    _collect_interface_candidates(
+        obj, iface_rules, candidates,
+        request_schema=request_schema,
+        openapi_components=openapi_components,
+        lifecycle_config=lifecycle_config,
+    )
     seen: set[tuple[str, str]] = set()
     ordered: list[tuple[str, str]] = []
     for _idx, field_name, value in sorted(
@@ -3267,11 +3534,11 @@ def build_test_scenarios(
     ollama: OllamaOrchestrator | None = None,
     expected_coverage: set[str] | None = None,
     env_file: dict | None = None,
+    openapi_components: dict | None = None,
 ):
     logger.info(f"Формирую тест-сценарии для {len(payload_records)} пейлоадов...")
-    os.makedirs("tests", exist_ok=True)
-    safe_name = target_endpoint.strip("/").replace("/", "_") + f"_{method}.json"
-    filepath = Path("tests") / safe_name
+    filepath = endpoint_to_test_file(target_endpoint, Path("tests"), method)
+    filepath.parent.mkdir(parents=True, exist_ok=True)
 
     dep_map = dependencies_config.get("field_mappings", dependencies_config)
     iface_rules = dependencies_config.get("interface_rules", {})
@@ -3288,6 +3555,14 @@ def build_test_scenarios(
     scenarios = []
     vid_pool = _VidPool(env_file)
     env_file = env_file or {}
+    lifecycle_config = parse_interface_lifecycle_config(dependencies_config)
+    if lifecycle_config and openapi_components is None:
+        openapi_components = load_openapi_components()
+    if lifecycle_config:
+        lifecycle_config = {
+            **lifecycle_config,
+            "skip_field_keys": lifecycle_config.get("exclude_fields", frozenset()),
+        }
 
     for record in payload_records:
         payload = synchronize_vid_ifname(record.payload, request_schema)
@@ -3337,6 +3612,9 @@ def build_test_scenarios(
             env_file=env_file,
             vid_pool=vid_pool,
             endpoint_rules=endpoint_rules,
+            request_schema=request_schema,
+            lifecycle_config=lifecycle_config,
+            openapi_components=openapi_components,
         )
 
         # =====================================================================

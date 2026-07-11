@@ -1,5 +1,28 @@
 {
   "field_mappings": {
+    "jail_name": {
+      "requirements": ["setup", "teardown"],
+      "setup": [
+        {
+          "endpoint": "/fail2ban/jail/add",
+          "method": "POST",
+          "payload": {
+            "jail_name": "{{jail_name}}"
+          },
+          "extract_to_variable": "created_jail_name",
+          "response_extract": "data.jail_name"
+        }
+      ],
+      "teardown": [
+        {
+          "endpoint": "/fail2ban/jail/delete",
+          "method": "POST",
+          "payload": {
+            "jail_name": "{{created_jail_name}}"
+          }
+        }
+      ]
+    },
     "primary_interface": {
       "optional": true,
       "setup": [
@@ -93,6 +116,40 @@
       },
       "optional": true
     },
+    "access_list": {
+      "requirements": ["setup", "teardown"],
+      "setup": {
+        "endpoint": "/acl/acl_ipv4",
+        "method": "POST",
+        "payload": {
+            "action": {
+              "add": {
+                "acl_name": "{{access_list}}",
+                "rule": {
+                  "dpi": {
+                    "dpi_protocol": "sina(weibo)"
+                  }
+                }
+              }
+            }
+        },
+        "extract_to_variable": "created_acl_name",
+        "response_extract": "data.access_list"
+      },
+      "teardown": {
+        "endpoint": "/acl/acl_ipv4",
+        "method": "POST",
+        "payload": {
+          "action": {
+            "delete": {
+              "acl_name": "{{created_acl_name}}"
+            }
+          }
+        },
+        "note": "Cleanup created access_list"
+      },
+      "optional": true
+    },
     "acl_name": {
       "setup": {
         "endpoint": "/acl/acl_ipv4",
@@ -128,6 +185,23 @@
     }
   },
   "endpoint_rules": {
+    "/fail2ban/unban": {
+      "requirements": ["setup", "teardown"],
+      "setup": {
+        "endpoint": "/fail2ban/enable",
+        "method": "POST",
+        "payload": {
+          "action": "start"
+        }
+      },
+      "teardown": {
+        "endpoint": "/fail2ban/enable",
+        "method": "POST",
+        "payload": {
+          "action": "stop"
+        }
+      }
+    },
     "/interfaces/common/noipv6_address": {
       "bind_fields": ["ifname", "ipv6_addr"],
       "setup": {
@@ -585,6 +659,16 @@
       ]
     }
   },
+  "interface_lifecycle": {
+    "schema_components": [
+      "IFNAME",
+      "interfaces_ethernet_ifname",
+      "interfaces_eth_vlan_ifname",
+      "interfaces_vlan_ifname"
+    ],
+    "rules_key": "ifname",
+    "exclude_fields": ["jail_name"]
+  },
   "mock_data": {
     "by_schema": {
       "IP_ADDR": ["10.0.0.1", "10.0.0.2", "10.0.0.3"],
@@ -593,9 +677,10 @@
       "IPV6_ADDR_WITH_BIT_MASK": ["2001:db8:1::1/64", "2001:db8:2::1/64"]
     },
     "by_field": {
-      "vrf_name": ["test_vrf_1", "test_vrf_2"],
-      "vrf": ["test_vrf_1", "test_vrf_2"],
-      "acl_name": ["test_acl_1"]
+      "jail_name": ["jail1", "jail2"],
+      "vrf_name": ["vrf1", "vrf2"],
+      "vrf": ["vrf1", "vrf2"],
+      "acl_name": ["acl1", "acl2"]
     }
   }
 }

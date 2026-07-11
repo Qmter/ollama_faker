@@ -115,10 +115,66 @@ class InterfaceInventoryTests(unittest.TestCase):
         result = apply_interface_inventory(schema, inventory)
         self.assertEqual(result["properties"]["ifname"]["enum"], ["eth1"])
 
+    def test_prefix_inventory_only_on_interface_schema_patterns(self):
+        """vlan100 не должен попадать в jail_name с произвольным pattern."""
+        ifname_pattern = r"^vlan\d+$"
+        inventory = [{
+            "names": ["vlan100", "vlan200"],
+            "prefix": "vlan",
+            "schema_patterns": [ifname_pattern],
+        }]
+        schema = {
+            "type": "object",
+            "properties": {
+                "jail_name": {
+                    "type": "string",
+                    "pattern": r"^[A-Za-z0-9_\-]{1,17}$",
+                },
+                "ifname": {
+                    "type": "string",
+                    "pattern": ifname_pattern,
+                },
+            },
+        }
+        result = apply_interface_inventory(schema, inventory)
+        self.assertNotIn("enum", result["properties"]["jail_name"])
+        self.assertEqual(result["properties"]["ifname"]["enum"], ["vlan100", "vlan200"])
+
+    def test_prefix_inventory_entry_gets_schema_patterns_from_rules(self):
+        dependencies = {
+            "interface_rules": {
+                "ifname": {
+                    "rules": [
+                        {"pattern": r"^vlan\d+$", "env": "DEVICE_VLAN_IFNAMES"},
+                        {
+                            "prefix": "vlan",
+                            "env": "DEVICE_VLAN_IFNAMES",
+                            "create": "/interfaces/vlan/add",
+                        },
+                    ],
+                },
+            },
+        }
+        env = {"DEVICE_VLAN_IFNAMES": "vlan100"}
+        inventory = build_interface_inventory(dependencies, env)
+        prefix_entry = next(e for e in inventory if e.get("prefix") == "vlan")
+        self.assertIn(r"^vlan\d+$", prefix_entry["schema_patterns"])
+
     def test_inventory_matches_schema_pattern(self):
         entry = {"pattern": r"^eth1$", "names": ["eth1"]}
         self.assertTrue(_inventory_matches_schema_pattern(entry, r"^eth1$"))
         self.assertFalse(_inventory_matches_schema_pattern(entry, r"^eth2$"))
+
+    def test_prefix_inventory_matches_only_declared_schema_patterns(self):
+        entry = {
+            "prefix": "vlan",
+            "names": ["vlan100"],
+            "schema_patterns": [r"^vlan\d+$"],
+        }
+        self.assertTrue(_inventory_matches_schema_pattern(entry, r"^vlan\d+$"))
+        self.assertFalse(
+            _inventory_matches_schema_pattern(entry, r"^[A-Za-z0-9_\-]{1,17}$"),
+        )
 
     def test_resolve_allowed_names_from_os_environ(self):
         rule = {"env": "DEVICE_ETH_IFNAMES"}

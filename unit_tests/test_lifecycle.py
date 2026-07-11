@@ -140,9 +140,9 @@ class SetupSortTests(unittest.TestCase):
         self.assertEqual(
             ordered,
             [
-                "/vrf",
                 "/interfaces/eth_vlan/add",
                 "/interfaces/bonding/add",
+                "/vrf",
                 "/interfaces/bonding/capability",
             ],
         )

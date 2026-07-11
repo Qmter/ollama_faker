@@ -220,5 +220,5 @@ __marimo__/
 .streamlit/secrets.toml
 
 
-tests/*.json
+tests/**/*.json
 .ollama_cache/

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Последовательный запуск сгенерированных REST API тестов из tests/*.json."""
+"""Последовательный запуск сгенерированных REST API тестов из tests/**/*.json."""
 
 from __future__ import annotations
 
@@ -27,6 +27,7 @@ from main import (
     resolve_run_endpoints,
     resolve_target_endpoints,
 )
+from test_paths import endpoint_to_test_file
 
 logger = logging.getLogger("RUNNER")
 
@@ -218,11 +219,6 @@ def _build_http_session(env_file: dict) -> requests.Session:
     return session
 
 
-def endpoint_to_test_file(endpoint: str, tests_dir: Path, method: str = "post") -> Path:
-    safe_name = endpoint.strip("/").replace("/", "_") + f"_{method}.json"
-    return tests_dir / safe_name
-
-
 def _log_endpoint_block_start(
     endpoint: str,
     test_file: Path,
@@ -235,7 +231,7 @@ def _log_endpoint_block_start(
     logger.info(
         f"ENDPOINT [{endpoint_index}/{endpoint_total}]  {endpoint}"
     )
-    logger.info(f"File: {test_file.name}  |  тестов: {scenario_count}")
+    logger.info(f"File: {test_file.as_posix()}  |  тестов: {scenario_count}")
     logger.info(_ENDPOINT_BORDER)
     logger.info(_SEPARATOR)
 

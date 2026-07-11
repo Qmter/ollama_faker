@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Предочистка маршрутизатора: выполняет teardown из tests/*.json."""
+"""Предочистка маршрутизатора: выполняет teardown из tests/**/*.json."""
 
 from __future__ import annotations
 
@@ -26,8 +26,8 @@ from run_tests import (
     _response_text,
     _teardown_succeeded,
     configure_logging,
-    endpoint_to_test_file,
 )
+from test_paths import endpoint_to_test_file
 
 logger = logging.getLogger("CLEAR")
 
@@ -101,7 +101,7 @@ def cleanup_step_succeeded(step: StepResult) -> bool:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Предочистка: выполнить teardown из tests/*.json перед run_tests.py",
+        description="Предочистка: выполнить teardown из tests/**/*.json перед run_tests.py",
     )
     parser.add_argument(
         "-e",
