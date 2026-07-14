@@ -14,18 +14,42 @@ from jsf import JSF
 from ollama_orchestrator import OllamaOrchestrator
 from resolve_scheme import ResolveScheme
 from test_paths import endpoint_to_test_file
+from log_paths import build_log_path
 
 # =============================================================================
 # ГЛОБАЛЬНАЯ НАСТРОЙКА ЛОГИРОВАНИЯ
 # =============================================================================
+# Именованный логгер процесса генерации (видно в каждой строке лога как MAIN).
 logger = logging.getLogger("MAIN")
 
+# Единый формат строк: время | уровень | имя логгера | сообщение
 _LOG_FORMAT = "%(asctime)s | %(levelname)-7s | %(name)-15s | %(message)s"
 _LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
+# Файл лога по умолчанию до вызова configure_logging() в main().
+# Имя: logs/gen_<datetime>_all.log (пока не передали -e/-d).
+_CURRENT_LOG_FILE = build_log_path("gen")
+
+
+def build_generation_log_path(
+    *,
+    endpoints: list[str] | None = None,
+    dir_prefixes: list[str] | None = None,
+) -> Path:
+    """
+    Обёртка над общим build_log_path для генератора.
+    Всегда префикс "gen" → logs/gen_<datetime>_<scope>.log
+    """
+    return build_log_path("gen", endpoints=endpoints, dir_prefixes=dir_prefixes)
+
 
 class _ListLogHandler(logging.Handler):
-    """Собирает записи лога в память (для воркеров)."""
+    """
+    Handler для параллельных воркеров (ProcessPoolExecutor).
+
+    Воркер не пишет в файл напрямую (конкуренция процессов опасна):
+    складывает строки в list, а главный процесс потом дописывает блоком.
+    """
 
     def __init__(self, buffer: list[str]):
         super().__init__()
@@ -33,37 +57,69 @@ class _ListLogHandler(logging.Handler):
         self.setFormatter(logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATE_FORMAT))
 
     def emit(self, record: logging.LogRecord) -> None:
+        # Одна готовая строка лога + перевод строки — как в обычном FileHandler
         self._buffer.append(self.format(record) + "\n")
 
 
 @dataclass
 class _EndpointTaskResult:
+    """Результат генерации одного эндпоинта из пула воркеров."""
+
     endpoint: str
-    log_lines: list[str]
+    log_lines: list[str]  # накопленный лог воркера (вставить в общий файл)
     error: BaseException | None = None
 
 
-def configure_logging(debug: bool = False, *, filemode: str = "w") -> None:
+def configure_logging(
+    debug: bool = False,
+    *,
+    filemode: str = "w",
+    log_file: Path | str | None = None,
+) -> Path:
+    """
+    Инициализирует корневой logging на файл генерации.
+
+    debug=True (-v)  → DEBUG (подробности по схеме, mock_data и т.д.)
+    filemode="w"     → новый файл на каждый запуск (не дописываем к старому)
+    log_file         → явный путь; если None, остаётся _CURRENT_LOG_FILE
+    """
+    global _CURRENT_LOG_FILE
+    if log_file is not None:
+        _CURRENT_LOG_FILE = Path(log_file)
+        # На случай logs/ или вложенного каталога из --custom path
+        _CURRENT_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
     level = logging.DEBUG if debug else logging.INFO
     logging.basicConfig(
-        filename="test.log",
+        filename=str(_CURRENT_LOG_FILE),
         filemode=filemode,
         level=level,
         format=_LOG_FORMAT,
         datefmt=_LOG_DATE_FORMAT,
-        force=True,
+        force=True,  # переконфигурировать, если logging уже кем-то настроен
         encoding="utf-8",
     )
+    return _CURRENT_LOG_FILE
+
+
+def get_generation_log_file() -> Path:
+    """Текущий файл лога генерации (удобно в тестах / отладке)."""
+    return _CURRENT_LOG_FILE
 
 
 def _configure_worker_capture_logging(verbose: bool) -> list[str]:
-    """Лог воркера только в память; main допишет блоком в test.log."""
+    """
+    В дочернем процессе: все logger.* → только в память (list), не в файл.
+
+    Главный процесс потом вызовет _append_log_block() и допишет буфер
+    в общий logs/gen_*.log без гонок записи.
+    """
     buffer: list[str] = []
     level = logging.DEBUG if verbose else logging.INFO
     root = logging.getLogger()
-    root.handlers.clear()
+    root.handlers.clear()  # убираем унаследованные FileHandler из родителя
     root.setLevel(level)
     root.addHandler(_ListLogHandler(buffer))
+    # Дочерние логгеры (MAIN и др.) пусть прокидывают в root, без своих handlers
     for logger_name in list(logging.root.manager.loggerDict):
         child = logging.getLogger(logger_name)
         child.handlers.clear()
@@ -73,20 +129,27 @@ def _configure_worker_capture_logging(verbose: bool) -> list[str]:
 
 
 def _flush_log_handlers() -> None:
+    """Сбрасывает буферы handlers на диск перед ручной допиской в файл."""
     for handler in logging.root.handlers:
         handler.flush()
 
 
 def _append_log_block(lines: list[str]) -> None:
+    """Дописывает блок строк от воркера в конец общего файла генерации."""
     if not lines:
         return
     _flush_log_handlers()
-    with open("test.log", "a", encoding="utf-8") as log_file:
+    with open(_CURRENT_LOG_FILE, "a", encoding="utf-8") as log_file:
         log_file.writelines(lines)
 
 
 def _write_generation_summary(started_at: float, endpoint_count: int) -> None:
-    """Пишет итоговое время в конец test.log (после всех воркеров)."""
+    """
+    Финальная строка в лог после всей генерации (включая параллельных воркеров).
+
+    Пишем напрямую в файл: к моменту finally обычные logger.info уже могут
+    быть неинформативны (воркеры/handlers), а summary всегда нужен в конце.
+    """
     _flush_log_handlers()
     elapsed = time.time() - started_at
     message = (
@@ -95,7 +158,7 @@ def _write_generation_summary(started_at: float, endpoint_count: int) -> None:
     )
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
     line = f"{timestamp} | INFO    | MAIN            | {message}\n"
-    with open("test.log", "a", encoding="utf-8") as log_file:
+    with open(_CURRENT_LOG_FILE, "a", encoding="utf-8") as log_file:
         log_file.write(line)
 
 
@@ -1629,6 +1692,71 @@ def _collect_endpoint_bind_vars(
     return {k: bind_vars[k] for k in bind_fields if k in bind_vars}
 
 
+def _fill_bind_fields_from_mock_data(
+    bind_vars: dict,
+    bind_fields: list[str],
+    mock_by_field: dict[str, list],
+) -> dict:
+    """Дополняет bind_fields значениями из mock_data.by_field, если поля нет в payload."""
+    if not bind_fields or not mock_by_field:
+        return bind_vars
+    for key in bind_fields:
+        if key in bind_vars:
+            continue
+        values = mock_by_field.get(key)
+        if values:
+            bind_vars[key] = values[0]
+            logger.debug(
+                f"bind_fields: {key}={values[0]!r} из mock_data.by_field",
+            )
+    return bind_vars
+
+
+def _inject_synthetic_field_dependencies(
+    deps: dict,
+    variables: dict,
+    *,
+    target_endpoint: str,
+    main_action: str | None,
+    dep_map: dict,
+    mock_by_field: dict[str, list],
+    synthetic_fields: dict[str, tuple[str, ...]] | None = None,
+) -> None:
+    """
+    Добавляет field_mappings для полей bind_fields, отсутствующих в main_test payload.
+    Например, delete/modify filter_ipv4 без acl_name → lifecycle ACL из field_mappings.
+    """
+    if not main_action or not mock_by_field:
+        return
+    if main_action not in ("delete", "modify"):
+        return
+
+    defaults = synthetic_fields or {}
+    endpoint_key = target_endpoint.rstrip("/")
+    fields = defaults.get(endpoint_key, ())
+    if not fields:
+        return
+
+    present_fields = {info["field"] for info in deps.values()}
+    for field in fields:
+        if field in present_fields or field not in dep_map:
+            continue
+        values = mock_by_field.get(field)
+        if not values:
+            continue
+        value = values[0]
+        variables[field] = value
+        deps[f"_synthetic.{field}"] = {
+            "field": field,
+            "value": value,
+            "config": dep_map[field],
+        }
+        logger.debug(
+            f"Синтетическая зависимость {field}={value!r} для {main_action} "
+            f"на {endpoint_key}",
+        )
+
+
 def _lifecycle_endpoint_from_config(config: dict, phase: str) -> str | None:
     """Endpoint из setup/teardown или legacy create/delete."""
     alt = "create" if phase == "setup" else "delete"
@@ -1650,6 +1778,30 @@ def _is_prerequisite_field(config: dict, target_endpoint: str) -> bool:
     teardown_ep = _lifecycle_endpoint_from_config(config, "teardown")
     for ep in (setup_ep, teardown_ep):
         if ep and ep.rstrip("/") != target:
+            return True
+    return False
+
+
+def _target_matches_skip_pattern(target_endpoint: str, pattern: str) -> bool:
+    """
+    Совпадение target с skip_targets:
+    - точное: /dns/server/zone/master/add
+    - префикс: /dns/server/zone/slave/* (звёздочка только в конце)
+    """
+    target = target_endpoint.rstrip("/")
+    pattern = pattern.rstrip("/")
+    if pattern.endswith("*"):
+        prefix = pattern[:-1].rstrip("/")
+        return target == prefix or target.startswith(f"{prefix}/")
+    return target == pattern
+
+
+def _should_skip_field_mapping(config: dict, target_endpoint: str) -> bool:
+    """field_mapping не применяется к перечисленным эндпоинтам (skip_targets)."""
+    for pattern in config.get("skip_targets", ()):
+        if isinstance(pattern, str) and _target_matches_skip_pattern(
+            target_endpoint, pattern,
+        ):
             return True
     return False
 
@@ -2045,6 +2197,56 @@ def _get_endpoint_rules(target_endpoint: str, endpoint_rules: dict) -> dict | No
     return rules if rules else None
 
 
+def _endpoint_rules_top_level_lifecycle(rules: dict) -> dict:
+    """Top-level setup/teardown на ключе эндпоинта (не action-блок)."""
+    return {
+        phase: rules[phase]
+        for phase in ("setup", "teardown")
+        if phase in rules
+    }
+
+
+def _endpoint_rules_action_lifecycle(rules: dict, action_key: str | None) -> dict | None:
+    """Блок setup/teardown для конкретного action (on, add first, a, mx, …)."""
+    if not action_key:
+        return None
+    block = rules.get(action_key)
+    if not isinstance(block, dict):
+        return None
+    if "setup" not in block and "teardown" not in block:
+        return None
+    return block
+
+
+_ENDPOINT_RULES_META_KEYS = frozenset({
+    "bind_fields",
+    "teardown_priority",
+    "lifecycle_key_field",
+    "requirements",
+})
+
+
+def _resolve_endpoint_rules_action_key(
+    rules: dict,
+    main_action: str | None,
+    bind_vars: dict,
+) -> tuple[str | None, str | None]:
+    """
+    Ключ блока rules для lifecycle:
+    - main_action из payload (on, add, …);
+    - иначе lifecycle_key_field (entry_type для entry/delete).
+    """
+    if main_action:
+        return main_action, "action"
+    key_field = rules.get("lifecycle_key_field")
+    if not key_field:
+        return None, None
+    key_value = bind_vars.get(key_field)
+    if key_value is None:
+        return None, None
+    return str(key_value).lower(), key_field
+
+
 def _apply_endpoint_rules_lifecycle(
     scenario,
     target_endpoint,
@@ -2053,11 +2255,13 @@ def _apply_endpoint_rules_lifecycle(
     action_data,
     endpoint_rules,
     variables,
+    mock_by_field: dict[str, list] | None = None,
 ):
     """
     Setup/teardown из endpoint_rules:
-    - с action в main_test → блок add/delete/modify/clear;
-    - без action → top-level setup/teardown на ключе эндпоинта.
+    - top-level setup/teardown применяется всегда;
+    - дополнительно — rules[main_action] или rules[lifecycle_key_field];
+    - lifecycle_key_field: поле payload (entry_type) для выбора блока a/mx/ns/….
     """
     rules = _get_endpoint_rules(target_endpoint, endpoint_rules)
     if not rules:
@@ -2066,6 +2270,9 @@ def _apply_endpoint_rules_lifecycle(
     bind_fields = rules.get("bind_fields", [])
     if bind_fields:
         bind_vars = _collect_endpoint_bind_vars(payload, action_data, bind_fields)
+        bind_vars = _fill_bind_fields_from_mock_data(
+            bind_vars, bind_fields, mock_by_field or {},
+        )
     elif main_action:
         bind_vars = _collect_bind_vars(action_data) if action_data else {}
     else:
@@ -2076,30 +2283,39 @@ def _apply_endpoint_rules_lifecycle(
         rules.get("teardown_priority", _TEARDOWN_PRIORITY_DEFAULT),
     )
 
-    if main_action:
-        lifecycle_source = rules.get(main_action, {})
-        scope_label = f"action {main_action} on {target_endpoint}"
-    else:
-        lifecycle_source = rules
-        scope_label = target_endpoint
+    lifecycle_sources: list[tuple[dict, str]] = []
+    if top := _endpoint_rules_top_level_lifecycle(rules):
+        lifecycle_sources.append((top, target_endpoint))
+    action_key, key_label = _resolve_endpoint_rules_action_key(
+        rules, main_action, bind_vars,
+    )
+    if action_block := _endpoint_rules_action_lifecycle(rules, action_key):
+        if key_label == "action":
+            scope = f"action {action_key} on {target_endpoint}"
+        else:
+            scope = f"{key_label}={action_key} on {target_endpoint}"
+        lifecycle_sources.append((action_block, scope))
 
-    for phase in ("setup", "teardown"):
-        for step_def in _as_lifecycle_list(lifecycle_source.get(phase)):
-            if not isinstance(step_def, dict) or "endpoint" not in step_def:
-                continue
-            step = copy.deepcopy(step_def)
-            if "note" not in step:
-                step["note"] = f"{phase}: {scope_label}"
-            step_priority = (
-                teardown_priority if phase == "teardown" else None
-            )
-            _append_custom_lifecycle_step(
-                scenario, phase, step, variables,
-                teardown_priority=step_priority,
-                setup_phase="endpoint",
-                target_endpoint=target_endpoint,
-            )
-            logger.debug(f"Endpoint {phase} ({scope_label}): {step['endpoint']}")
+    for lifecycle_source, scope_label in lifecycle_sources:
+        for phase in ("setup", "teardown"):
+            for step_def in _as_lifecycle_list(lifecycle_source.get(phase)):
+                if not isinstance(step_def, dict) or "endpoint" not in step_def:
+                    continue
+                step = copy.deepcopy(step_def)
+                if "note" not in step:
+                    step["note"] = f"{phase}: {scope_label}"
+                step_priority = (
+                    teardown_priority if phase == "teardown" else None
+                )
+                _append_custom_lifecycle_step(
+                    scenario, phase, step, variables,
+                    teardown_priority=step_priority,
+                    setup_phase="endpoint",
+                    target_endpoint=target_endpoint,
+                )
+                logger.debug(
+                    f"Endpoint {phase} ({scope_label}): {step['endpoint']}",
+                )
 
 
 # =============================================================================
@@ -3507,6 +3723,11 @@ def _apply_field_mapping_dependencies(
         field = dep_info["field"]
         value = dep_info["value"]
         config = dep_info["config"]
+        if _should_skip_field_mapping(config, target_endpoint):
+            logger.debug(
+                f"Skip field_mapping {field} for {target_endpoint} (skip_targets)",
+            )
+            continue
         is_prerequisite = _is_prerequisite_field(config, target_endpoint)
         if prerequisites_only != is_prerequisite:
             continue
@@ -3543,6 +3764,10 @@ def build_test_scenarios(
     dep_map = dependencies_config.get("field_mappings", dependencies_config)
     iface_rules = dependencies_config.get("interface_rules", {})
     endpoint_rules = dependencies_config.get("endpoint_rules", {})
+    mock_by_field = (parse_mock_data_config(dependencies_config) or {}).get(
+        "by_field", {},
+    )
+    synthetic_bind_fields = dependencies_config.get("synthetic_bind_fields", {})
     auto_scalar_delete = (
         detect_scalar_delete_action_pattern(request_schema)
         if request_schema else None
@@ -3590,6 +3815,15 @@ def build_test_scenarios(
             _collect_bind_vars(payload, variables)
 
         deps = scan_payload_for_dependencies(payload, dep_map)
+        _inject_synthetic_field_dependencies(
+            deps,
+            variables,
+            target_endpoint=target_endpoint,
+            main_action=main_action,
+            dep_map=dep_map,
+            mock_by_field=mock_by_field,
+            synthetic_fields=synthetic_bind_fields,
+        )
 
         # =====================================================================
         # 1. PREREQUISITE field_mappings (vrf, dhcp pool, …)
@@ -3633,7 +3867,7 @@ def build_test_scenarios(
         # =====================================================================
         _apply_endpoint_rules_lifecycle(
             scenario, target_endpoint, payload, main_action, action_data,
-            endpoint_rules, variables,
+            endpoint_rules, variables, mock_by_field=mock_by_field,
         )
 
         # =====================================================================
@@ -3729,7 +3963,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "-v",
         "--verbose",
         action="store_true",
-        help="Debug-режим логирования (test.log)",
+        help="Debug-режим логирования (logs/gen_*.log)",
     )
     parser.add_argument(
         "-c",
@@ -3976,9 +4210,16 @@ def main(argv: list[str] | None = None):
     args = parse_args(argv)
     if args.workers < 1:
         raise SystemExit("--workers должен быть >= 1")
-    configure_logging(debug=args.verbose)
+    # Имя лога зависит от -e/-d: logs/gen_<datetime>_<scope>.log
+    # (all | interfaces | dns_client | ...)
+    log_path = build_generation_log_path(
+        endpoints=args.endpoint,
+        dir_prefixes=args.dir,
+    )
+    configure_logging(debug=args.verbose, log_file=log_path)
 
     logger.info("Запуск генератора тестов...")
+    logger.info(f"Лог: {log_path.as_posix()}")
     start_main = time.time()
     ollama = OllamaOrchestrator.from_cli(args.ollama, args.ollama_features)
     

@@ -28,6 +28,7 @@ from main import (
     resolve_target_endpoints,
 )
 from test_paths import endpoint_to_test_file
+from log_paths import resolve_cli_log_file
 
 logger = logging.getLogger("RUNNER")
 
@@ -87,10 +88,17 @@ class EndpointRunResult:
     failed_test_ids: list[int] = field(default_factory=list)
 
 
-def configure_logging(*, verbose: bool, log_file: str) -> None:
+def configure_logging(*, verbose: bool, log_file: str | Path) -> None:
+    """
+    Лог прогона тестов в файл (обычно logs/run_<datetime>_<scope>.log).
+
+    verbose / -v → DEBUG (полные тела HTTP);
+    иначе INFO. filemode="w" — новый файл на каждый запуск.
+    urllib3/requests глушим, чтобы не засорять лог служебным шумом.
+    """
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(
-        filename=log_file,
+        filename=str(log_file),
         filemode="w",
         level=level,
         format=_LOG_FORMAT,
@@ -123,7 +131,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "-v",
         "--verbose",
         action="store_true",
-        help="Подробный лог: полные тела запросов и ответов (run.log)",
+        help="Подробный лог: полные тела запросов и ответов (logs/run_*.log)",
     )
     parser.add_argument(
         "--base-url",
@@ -138,9 +146,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--log-file",
-        default="run.log",
+        default=None,
         metavar="FILE",
-        help="Файл лога запуска (по умолчанию: run.log)",
+        help="Файл лога (по умолчанию: logs/run_<datetime>_<scope>.log)",
     )
     parser.add_argument(
         "--timeout",
@@ -853,7 +861,15 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     if args.max_teardown_retry < 0:
         raise SystemExit("--max-teardown-retry должен быть >= 0")
-    configure_logging(verbose=args.verbose, log_file=args.log_file)
+    # Путь лога: --log-file, иначе logs/run_<datetime>_<scope>.log
+    # scope берётся из -d / -e (как в gen/clear), чтобы логи запусков не смешивались
+    log_path = resolve_cli_log_file(
+        args.log_file,
+        "run",
+        endpoints=args.endpoint,
+        dir_prefixes=args.dir,
+    )
+    configure_logging(verbose=args.verbose, log_file=log_path)
 
     started_at = time.time()
     env_file = load_env_file()
@@ -866,7 +882,7 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("Запуск тестов REST API")
     logger.info(f"Base URL : {base_url}")
     logger.info(f"Tests dir: {tests_dir.resolve()}")
-    logger.info(f"Log file : {Path(args.log_file).resolve()}")
+    logger.info(f"Log file : {log_path.resolve()}")
     logger.info(f"Verbose  : {args.verbose}")
     logger.info(f"Teardown retries: {args.max_teardown_retry}")
     logger.info(f"Recover already exists: {args.recover_already_exists}")
@@ -913,7 +929,7 @@ def main(argv: list[str] | None = None) -> int:
     if not endpoint_files:
         logger.error("Нет тестов для запуска")
         _finalize_run(
-            log_file=args.log_file,
+            log_file=str(log_path),
             summary=summary,
             endpoint_results=endpoint_results,
             elapsed_sec=time.time() - started_at,
@@ -990,7 +1006,7 @@ def main(argv: list[str] | None = None) -> int:
                         ),
                     )
                     _finalize_run(
-                        log_file=args.log_file,
+                        log_file=str(log_path),
                         summary=summary,
                         endpoint_results=endpoint_results,
                         elapsed_sec=time.time() - started_at,
@@ -1014,7 +1030,7 @@ def main(argv: list[str] | None = None) -> int:
 
     elapsed = time.time() - started_at
     _finalize_run(
-        log_file=args.log_file,
+        log_file=str(log_path),
         summary=summary,
         endpoint_results=endpoint_results,
         elapsed_sec=elapsed,
@@ -1025,7 +1041,7 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"Готово за {elapsed:.2f} с | "
         f"сценариев PASS/FAIL: {summary.passed_scenarios}/{summary.failed_scenarios} | "
-        f"лог: {args.log_file}"
+        f"лог: {log_path.as_posix()}"
     )
     if summary.skipped_files:
         print(f"Пропущено файлов: {len(summary.skipped_files)}")

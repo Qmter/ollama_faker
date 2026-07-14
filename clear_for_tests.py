@@ -28,6 +28,7 @@ from run_tests import (
     configure_logging,
 )
 from test_paths import endpoint_to_test_file
+from log_paths import resolve_cli_log_file
 
 logger = logging.getLogger("CLEAR")
 
@@ -121,7 +122,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "-v",
         "--verbose",
         action="store_true",
-        help="Подробный лог в clear.log",
+        help="Подробный лог (logs/clear_*.log)",
     )
     parser.add_argument(
         "--base-url",
@@ -136,9 +137,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--log-file",
-        default="clear.log",
+        default=None,
         metavar="FILE",
-        help="Файл лога (по умолчанию: clear.log)",
+        help="Файл лога (по умолчанию: logs/clear_<datetime>_<scope>.log)",
     )
     parser.add_argument(
         "--timeout",
@@ -199,7 +200,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.max_teardown_retry < 0:
         raise SystemExit("--max-teardown-retry должен быть >= 0")
 
-    configure_logging(verbose=args.verbose, log_file=args.log_file)
+    # Путь лога: --log-file, иначе logs/clear_<datetime>_<scope>.log
+    log_path = resolve_cli_log_file(
+        args.log_file,
+        "clear",
+        endpoints=args.endpoint,
+        dir_prefixes=args.dir,
+    )
+    configure_logging(verbose=args.verbose, log_file=log_path)
     started_at = time.time()
     env_file = load_env_file()
     base_url = _resolve_base_url(args.base_url, env_file)
@@ -208,7 +216,7 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("Предочистка маршрутизатора (teardown из тестов)")
     logger.info(f"Base URL : {base_url}")
     logger.info(f"Tests dir: {tests_dir.resolve()}")
-    logger.info(f"Log file : {Path(args.log_file).resolve()}")
+    logger.info(f"Log file : {log_path.resolve()}")
     logger.info(f"Dry run  : {args.dry_run}")
     logger.info(_SEPARATOR)
 
@@ -248,7 +256,7 @@ def main(argv: list[str] | None = None) -> int:
             print(line, flush=True)
         elapsed = time.time() - started_at
         print(
-            f"\nDry-run: {len(steps)} шагов, лог: {args.log_file} "
+            f"\nDry-run: {len(steps)} шагов, лог: {log_path.as_posix()} "
             f"({elapsed:.2f} сек.)",
             flush=True,
         )
@@ -284,7 +292,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print(
         f"\nГотово за {elapsed:.2f} сек. | teardown OK/FAIL: "
-        f"{len(steps) - failed}/{failed} | лог: {args.log_file}",
+        f"{len(steps) - failed}/{failed} | лог: {log_path.as_posix()}",
         flush=True,
     )
     return 1 if failed else 0

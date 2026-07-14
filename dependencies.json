@@ -1,5 +1,28 @@
 {
   "field_mappings": {
+    "zone_name": {
+      "requirements": ["setup", "teardown"],
+      "skip_targets": [
+        "/dns/server/zone/master/add",
+        "/dns/server/zone/slave/*"
+      ],
+      "setup": {
+        "endpoint": "/dns/server/zone/master/add",
+        "method": "POST",
+        "payload": {
+          "zone_name": "{{zone_name}}"
+        },
+        "extract_to_variable": "created_zone_name",
+        "response_extract": "data.zone_name"
+      },
+      "teardown": {
+        "endpoint": "/dns/server/zone/master/delete",
+        "method": "POST",
+        "payload": {
+          "zone_name": "{{zone_name}}"
+        }
+      }
+    },
     "jail_name": {
       "requirements": ["setup", "teardown"],
       "setup": [
@@ -100,7 +123,7 @@
         "method": "POST",
         "payload": {
           "action": "add",
-          "vrf": "{{vrf}}"
+          "vrf_name": "{{vrf}}"
         },
         "extract_to_variable": "created_vrf",
         "response_extract": "data.vrf"
@@ -110,7 +133,7 @@
         "method": "POST",
         "payload": {
           "action": "delete",
-          "vrf": "{{vrf}}"
+          "vrf_name": "{{vrf}}"
         },
         "note": "Cleanup created vrf"
       },
@@ -185,6 +208,242 @@
     }
   },
   "endpoint_rules": {
+    "dns/server/serial": {
+      "teardown": {
+        "endpoint": "/dns/server/serial",
+        "method": "POST",
+        "payload": {
+          "serial": "system-time"
+        }
+      }
+    },
+    "/dns/server/zone/master/add": {
+      "bind_fields": ["zone_name"],
+      "teardown": {
+        "endpoint": "/dns/server/zone/master/delete",
+        "method": "POST",
+        "payload": {
+          "zone_name": "{{zone_name}}"
+        },
+        "note": "Cleanup master zone after add test"
+      }
+    },
+    "/dns/server/zone/slave/add": {
+      "bind_fields": ["zone_name", "master_ip"],
+      "teardown": {
+        "endpoint": "/dns/server/zone/slave/delete",
+        "method": "POST",
+        "payload": {
+          "zone_name": "{{zone_name}}"
+        },
+        "note": "Cleanup slave zone after add test"
+      }
+    },
+    "/dns/server/zone/slave/delete": {
+      "bind_fields": ["zone_name", "master_ip"],
+      "setup": {
+        "endpoint": "/dns/server/zone/slave/add",
+        "method": "POST",
+        "payload": {
+          "zone_name": "{{zone_name}}",
+          "master_ip": "{{master_ip}}"
+        },
+        "expected_status": 200,
+        "note": "Create slave zone before delete test"
+      }
+    },
+    "/dns/server/zone/master/entry/add": {
+      "bind_fields": ["zone_name", "entry_name", "entry_type"],
+      "teardown_priority": 55,
+      "teardown": {
+        "endpoint": "/dns/server/zone/master/entry/delete",
+        "method": "POST",
+        "payload": {
+          "zone_name": "{{zone_name}}",
+          "entry_name": "{{entry_name}}",
+          "entry_type": "{{entry_type}}"
+        },
+        "note": "Cleanup DNS entry after add test"
+      }
+    },
+    "/dns/server/zone/master/entry/delete": {
+      "lifecycle_key_field": "entry_type",
+      "bind_fields": ["zone_name", "entry_name", "entry_type", "ip_address", "priority"],
+      "a": {
+        "setup": {
+          "endpoint": "/dns/server/zone/master/entry/add",
+          "method": "POST",
+          "payload": {
+            "zone_name": "{{zone_name}}",
+            "entry": {
+              "entry_name": "{{entry_name}}",
+              "entry_params": {
+                "entry_type": "a",
+                "ip_address": "{{ip_address}}"
+              }
+            }
+          },
+          "expected_status": 200,
+          "note": "Create A record before delete test"
+        }
+      },
+      "aaaa": {
+        "setup": {
+          "endpoint": "/dns/server/zone/master/entry/add",
+          "method": "POST",
+          "payload": {
+            "zone_name": "{{zone_name}}",
+            "entry": {
+              "entry_name": "{{entry_name}}",
+              "entry_params": {
+                "entry_type": "aaaa",
+                "ip_address": "2001:db8::1"
+              }
+            }
+          },
+          "expected_status": 200,
+          "note": "Create AAAA record before delete test"
+        }
+      },
+      "mx": {
+        "setup": {
+          "endpoint": "/dns/server/zone/master/entry/add",
+          "method": "POST",
+          "payload": {
+            "zone_name": "{{zone_name}}",
+            "entry": {
+              "entry_name": "{{entry_name}}",
+              "entry_params": {
+                "entry_type": "mx",
+                "priority": "{{priority}}"
+              }
+            }
+          },
+          "expected_status": 200,
+          "note": "Create MX record before delete test"
+        }
+      },
+      "ns": {
+        "setup": {
+          "endpoint": "/dns/server/zone/master/entry/add",
+          "method": "POST",
+          "payload": {
+            "zone_name": "{{zone_name}}",
+            "entry": {
+              "entry_name": "{{entry_name}}",
+              "entry_params": {
+                "entry_type": "ns"
+              }
+            }
+          },
+          "expected_status": 200,
+          "note": "Create NS record before delete test"
+        }
+      }
+    },
+    "/dns/server": {
+      "bind_fields": ["vrf_name"],
+      "teardown": [
+      {
+        "endpoint": "/dns/server",
+        "method": "POST",
+        "payload": {
+          "allow_query": "any",
+          "allow_transfer": "any",
+          "listen_addresses": "any",
+          "listen_port": 53,
+          "recursion": false
+          }
+      },
+      {
+        "endpoint": "/dns/server/control",
+        "method": "POST",
+        "payload": {
+          "action": "off"
+        }
+      }
+    ]
+    },
+    "/dns/proxy": {
+      "bind_fields": ["vrf_name"],
+      "teardown": {
+        "endpoint": "/dns/proxy/delete",
+        "method": "POST",
+        "payload": {
+          "vrf_name": "{{vrf_name}}"
+        },
+        "note": "Cleanup DNS proxy after control test"
+      }
+    },
+    "/dns/proxy/delete": {
+      "bind_fields": ["vrf_name", "option_authoritative", "option_recursive"],
+      "setup": {
+        "endpoint": "/dns/proxy",
+        "method": "POST",
+        "payload": {
+          "vrf_name": "{{vrf_name}}",
+          "option_authoritative": "{{option_authoritative}}",
+          "option_recursive": "{{option_recursive}}"
+        }
+      }
+    },
+    "/dns/proxy/control": {
+      "bind_fields": ["vrf_name", "option_authoritative", "option_recursive"],
+      "setup": {
+        "endpoint": "/dns/proxy",
+        "method": "POST",
+        "payload": {
+          "vrf_name": "{{vrf_name}}",
+          "option_authoritative": "{{option_authoritative}}",
+          "option_recursive": "{{option_recursive}}"
+        },
+        "note": "Create DNS proxy before control test"
+      },
+      "teardown": {
+        "endpoint": "/dns/proxy/delete",
+        "method": "POST",
+        "payload": {
+          "vrf_name": "{{vrf_name}}"
+        },
+        "note": "Cleanup DNS proxy after control test"
+      }
+    },
+    "/dns/client": {
+      "bind_fields": ["ip_addr"],
+      "add first": {
+        "teardown": {
+          "endpoint": "/dns/client",
+          "method": "POST",
+          "payload": {
+            "action": "delete",
+            "ip_addr": "{{ip_addr}}"
+          },
+          "note": "Cleanup DNS client after add first test"
+        }
+      },
+      "add last": {
+        "teardown": {
+          "endpoint": "/dns/client",
+          "method": "POST",
+          "payload": {
+            "action": "delete",
+            "ip_addr": "{{ip_addr}}"
+          },
+          "note": "Cleanup DNS client after add last test"
+        }
+      },
+      "delete": {
+        "setup": {
+          "endpoint": "/dns/client",
+          "method": "POST",
+          "payload": {
+            "action": "add first",
+            "ip_addr": "{{ip_addr}}"
+          },
+          "note": "Create DNS client before delete test"
+        }
+      }
+    },
     "/fail2ban/unban": {
       "requirements": ["setup", "teardown"],
       "setup": {
@@ -320,23 +579,6 @@
       "delete": {
         "setup": [
           {
-            "endpoint": "/acl/acl_ipv4",
-            "method": "POST",
-            "payload": {
-              "action": {
-                "add": {
-                  "acl_name": "test_acl_name",
-                  "rule": {
-                    "dpi": {
-                      "dpi_protocol": "sina(weibo)"
-                    }
-                  }
-                }
-              }
-            },
-            "note": "Create acl before delete test"
-          },
-          {
           "endpoint": "/acl/filter/filter_ipv4",
           "method": "POST",
           "payload": {
@@ -345,7 +587,7 @@
                 "vrf": "{{vrf}}",
                 "chain": "{{chain}}",
                 "filter": {
-                  "acl_name": "test_acl_name",
+                  "acl_name": "{{acl_name}}",
                   "action": "permit"
                 }
               }
@@ -358,37 +600,23 @@
       "modify": {
         "setup": [
           {
-            "endpoint": "/acl/acl_ipv4",
+            "endpoint": "/acl/filter/filter_ipv4",
             "method": "POST",
             "payload": {
               "action": {
                 "add": {
-                  "acl_name": "test_acl_name",
-                  "dpi": {
-                    "dpi_protocol": "sina(weibo)"
+                  "vrf": "{{vrf}}",
+                  "chain": "{{chain}}",
+                  "filter": {
+                    "acl_name": "{{acl_name}}",
+                    "action": "permit"
                   }
                 }
               }
-            }
-          },
-          {
-          "endpoint": "/acl/filter/filter_ipv4",
-          "method": "POST",
-          "payload": {
-            "action": {
-              "add": {
-                "vrf": "{{vrf}}",
-                "chain": "{{chain}}",
-                "filter": {
-                  "acl_name": "test_acl_name",
-                  "action": "permit"
-                }
-              }
-            }
-          },
-          "note": "Create filter before modify test"
-        }
-      ],
+            },
+            "note": "Create filter before modify test"
+          }
+        ],
         "teardown": [
           {
             "endpoint": "/acl/filter/filter_ipv4",
@@ -402,20 +630,8 @@
               }
             },
             "note": "Cleanup filter after modify test"
-          },
-          {
-            "endpoint": "/acl/acl_ipv4",
-            "method": "POST",
-            "payload": {
-              "action": {
-                "delete": {
-                  "acl_name": "test_acl_name"
-                }
-              }
-            },
-            "note": "Cleanup acl after modify test"
           }
-      ]
+        ]
       }
     }
   },
@@ -669,6 +885,9 @@
     "rules_key": "ifname",
     "exclude_fields": ["jail_name"]
   },
+  "synthetic_bind_fields": {
+    "/acl/filter/filter_ipv4": ["acl_name"]
+  },
   "mock_data": {
     "by_schema": {
       "IP_ADDR": ["10.0.0.1", "10.0.0.2", "10.0.0.3"],
@@ -677,6 +896,13 @@
       "IPV6_ADDR_WITH_BIT_MASK": ["2001:db8:1::1/64", "2001:db8:2::1/64"]
     },
     "by_field": {
+      "description": ["", "autotest-desc"],
+      "zone_name": ["zone1", "zone2"],
+      "master_ip": ["10.0.0.1", "10.0.0.2"],
+      "ip_address": ["10.0.0.1"],
+      "priority": [0],
+      "option_authoritative": ["10.0.0.1"],
+      "option_recursive": ["10.0.0.1"],
       "jail_name": ["jail1", "jail2"],
       "vrf_name": ["vrf1", "vrf2"],
       "vrf": ["vrf1", "vrf2"],
