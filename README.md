@@ -1,110 +1,199 @@
-# llm_faker
+# ollama_faker
 
 Генератор и раннер REST API тестов для маршрутизатора по OpenAPI-схеме.
 
-1. **`main.py`** — читает `openapi.json`, строит пейлоады (JSF + покрытие enum/границ), добавляет `setup` / `main_test` / `teardown` из `dependencies.json`, пишет сценарии в `tests/`.
-2. **`run_tests.py`** — последовательно выполняет сценарии на реальном устройстве.
-3. **`run_unit_tests.py`** — офлайн-проверка логики генератора (без HTTP).
+Идея простая: **весь поведение сценариев настраивается в JSON и `.env`**, а не в Python. Код только:
+
+1. читает `openapi.json`;
+2. строит пейлоады (покрытие enum / границ / boolean);
+3. по `dependencies.json` добавляет `setup` / `teardown`;
+4. пишет JSON в `tests/`;
+5. `run_tests.py` гоняет эти JSON на живом устройстве.
+
+```
+openapi.json + dependencies.json + .env
+        │
+        ▼
+     main.py  ──►  tests/<group>/<endpoint>_post.json
+        │
+        ▼
+  clear_for_tests.py (опционально, предочистка)
+        │
+        ▼
+   run_tests.py  ──►  logs/run_*.log + таблица PASS/FAIL
+```
+
+---
+
+## Содержание
+
+1. [Быстрый старт](#быстрый-старт)
+2. [Структура проекта](#структура-проекта)
+3. [Рабочий процесс](#рабочий-процесс)
+4. [CLI: генерация (`main.py`)](#cli-генерация-mainpy)
+5. [CLI: предочистка (`clear_for_tests.py`)](#cli-предочистка-clear_for_testspy)
+6. [CLI: прогон (`run_tests.py`)](#cli-прогон-run_testspy)
+7. [Unit-тесты](#unit-тесты)
+8. [Логи](#логи)
+9. [Файл `.env`](#файл-env)
+10. [`dependencies.json` — обзор](#dependenciesjson--обзор)
+11. [Формат lifecycle-шага](#формат-lifecycle-шага)
+12. [Плейсхолдеры `{{…}}`](#плейсхолдеры-)
+13. [Порядок setup / teardown](#порядок-setup--teardown)
+14. [`field_mappings`](#field_mappings)
+15. [`interface_rules`](#interface_rules)
+16. [`endpoint_rules`](#endpoint_rules)
+17. [`mock_data`](#mock_data)
+18. [`interface_lifecycle` и `synthetic_bind_fields`](#interface_lifecycle-и-synthetic_bind_fields)
+19. [Формат сгенерированного теста](#формат-сгенерированного-теста)
+20. [Как работает генерация (pipeline)](#как-работает-генерация-pipeline)
+21. [Ollama (опционально)](#ollama-опционально)
+22. [Типичные задачи и чеклисты](#типичные-задачи-и-чеклисты)
+23. [Зависимости Python](#зависимости-python)
 
 ---
 
 ## Быстрый старт
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
+python -m venv .venv
+# Windows:
+.venv\Scripts\activate
+# Linux/macOS:
+# source .venv/bin/activate
+
 pip install jsf jsonschema requests
 
 cp .env.example .env
-# отредактируйте .env: интерфейсы, API_BASE_URL, авторизация
+# отредактируйте .env: интерфейсы устройства, API_BASE_URL, логин/пароль
 
-# 1. Сгенерировать тесты
+# 1. Сгенерировать сценарии для группы
 python main.py -d /interfaces
 
-# 2. Прогнать на устройстве
+# 2. (опционально) снести хвосты от прошлых прогонов
+python clear_for_tests.py -d /interfaces
+
+# 3. Прогнать на устройстве
 python run_tests.py -d /interfaces -v
 
-# 3. Проверить логику генератора (без API)
+# 4. Проверить логику генератора без сети
 python run_unit_tests.py -v
 ```
+
+`-e` и `-d` действуют одинаково во всех трёх скриптах: один эндпоинт / список или префикс пути.
 
 ---
 
 ## Структура проекта
 
-| Файл / каталог | Назначение |
-|----------------|------------|
-| `main.py` | Генерация пейлоадов и сценариев |
-| `run_tests.py` | Запуск тестов на устройстве |
-| `run_unit_tests.py` | Запуск unit-тестов |
-| `unit_tests/` | Unit-тесты по модулям |
-| `resolve_scheme.py` | Разрешение `$ref`, обход схемы |
-| `ollama_orchestrator.py` | Опционально: описания и enrich через Ollama |
-| `openapi.json` | OpenAPI-спецификация API |
-| `dependencies.json` | Зависимости, lifecycle, mock-данные |
-| `.env` | Инвентарь интерфейсов и доступ к API |
-| `tests/` | Сгенерированные JSON-сценарии (не путать с `unit_tests/`) |
-| `test.log` | Лог генерации (`main.py`) |
-| `run.log` | Лог прогона (`run_tests.py`) |
+| Путь | Назначение |
+|------|------------|
+| `main.py` | Генерация пейлоадов и JSON-сценариев |
+| `run_tests.py` | Прогон сценариев на устройстве |
+| `clear_for_tests.py` | Предочистка: уникальные teardown из тестов |
+| `run_unit_tests.py` | Офлайн unit-тесты генератора |
+| `resolve_scheme.py` | Разрешение `$ref`, обход OpenAPI |
+| `ollama_orchestrator.py` | Опциональные описания через Ollama |
+| `log_paths.py` | Общие имена логов `logs/<prefix>_…` |
+| `test_paths.py` | Путь API → файл в `tests/` |
+| `openapi.json` | Спецификация API устройства |
+| `dependencies.json` | Lifecycle, mock-данные, правила интерфейсов |
+| `.env` / `.env.example` | Инвентарь интерфейсов + доступ к API |
+| `tests/` | Сгенерированные сценарии (не путать с `unit_tests/`) |
+| `unit_tests/` | Unit-тесты |
+| `logs/` | Логи генерации / прогона / очистки |
 
 ---
 
-## Как работает генерация
+## Рабочий процесс
 
+### Рекомендуемый цикл для группы API
+
+```bash
+# Настроить .env и dependencies.json под устройство
+python main.py -d /interfaces -c          # генерация (compact — меньше сценариев)
+python clear_for_tests.py -d /interfaces  # убрать «уже создано» с прошлого раза
+python run_tests.py -d /interfaces -v     # прогон
+# смотреть logs/run_*_interfaces.log → править dependencies / mock_data / .env
+python main.py -d /interfaces -c          # перегенерация после правок
 ```
-openapi.json
-    → ResolveScheme.resolve_endpoint()      # $ref
-    → preprocess_schema_for_jsf()           # oneOf → enum, nullable
-    → apply_interface_inventory()           # pattern → enum из .env
-    → apply_mock_data()                     # mock_data → enum (IP, VRF, …)
-    → generate_value_coverage_payloads()    # покрытие значений + JSF
-    → build_test_scenarios()                # setup / teardown из dependencies.json
-    → tests/*.json
+
+### Один эндпоинт
+
+```bash
+python main.py -e /interfaces/bonding/mode
+python run_tests.py -e /interfaces/bonding/mode -v
 ```
 
-### Порядок lifecycle в сценарии
+### Полный прогон всего OpenAPI
 
-Для каждого пейлоада `build_test_scenarios()` выполняет:
-
-1. **Prerequisite** `field_mappings` — VRF, DHCP pool и т.п. (другой эндпоинт).
-2. **Interface rules** — создание `ifname` (bond откладывается, если `setup_defer: true`).
-3. **Field mappings** — enslave, ACL и прочие поля.
-4. **Endpoint rules** — setup/teardown тестируемого API по `action`.
-5. **Auto scalar delete** — `action.add` (object) + `action.delete` (скаляр).
-6. Сортировка **setup** по фазам, внутри фазы `…/add` раньше остальных.
-7. Сортировка **teardown** по `teardown_priority` (меньше число → раньше).
+```bash
+python main.py --workers 4
+python run_tests.py --stop-on-failure
+```
 
 ---
 
-## Запуск `main.py` (генерация)
+## CLI: генерация (`main.py`)
 
 ```bash
 python main.py                              # все POST из openapi.json
-python main.py -d /interfaces               # префикс пути
-python main.py -e /vrf /interfaces/bonding/add
-python main.py -d /interfaces -v            # debug → test.log
-python main.py -d /interfaces -c            # компактное покрытие (enum >10 → 3 значения)
-python main.py --workers 4                  # параллельно (2+ эндпоинта)
-python main.py --ollama                     # описания тестов через Ollama
+python main.py -d /interfaces               # все POST с префиксом
+python main.py -e /vrf /dns/client
+python main.py -d /interfaces -v            # DEBUG → logs/gen_*.log
+python main.py -d /interfaces -c            # компактное покрытие enum
+python main.py --workers 4                  # параллельно (нужно ≥2 эндпоинта)
+python main.py --ollama                     # описания/имена через Ollama
 ```
 
 | Аргумент | Описание |
 |----------|----------|
-| `-e`, `--endpoint PATH [PATH ...]` | Один или несколько POST-эндпоинтов |
-| `-d`, `--dir PREFIX [PREFIX ...]` | Все POST, путь которых начинается с PREFIX |
-| `-v`, `--verbose` | DEBUG в `test.log` |
-| `-c`, `--compact-coverage` | Меньше комбинаций для больших enum |
-| `--workers N` | Параллельная генерация (при 2+ эндпоинтах) |
+| `-e`, `--endpoint PATH …` | Один или несколько POST-путей |
+| `-d`, `--dir PREFIX …` | Все POST, путь которых начинается с PREFIX |
+| `-v`, `--verbose` | DEBUG в лог генерации |
+| `-c`, `--compact-coverage` | Большие enum (>10) → 3 значения вместо всех |
+| `--workers N` | N процессов (только при 2+ эндпоинтах) |
 | `--ollama` | Включить Ollama |
 | `--ollama-features LIST` | `describe`, `enrich` (по умолчанию оба) |
 
-`-e` и `-d` **нельзя** указывать одновременно.
+`-e` и `-d` **нельзя** указывать одновременно. Без обоих — все POST из `openapi.json`.
 
-**Результат:** `tests/<endpoint>_post.json`, лог в `test.log`.
+**Результат:** `tests/<первый_сегмент>/<все_сегменты>_post.json`, например:
+
+```
+/interfaces/bonding/mode  →  tests/interfaces/interfaces_bonding_mode_post.json
+/acl/filter/filter_ipv4   →  tests/acl/acl_filter_filter_ipv4_post.json
+/vrf                      →  tests/vrf_post.json
+```
 
 ---
 
-## Запуск `run_tests.py` (прогон на устройстве)
+## CLI: предочистка (`clear_for_tests.py`)
+
+Собирает все уникальные шаги `teardown` из выбранных JSON и выполняет их **до** прогона. Нужно, когда устройство «грязное» после прошлых FAIL.
+
+```bash
+python clear_for_tests.py -d /interfaces
+python clear_for_tests.py -d /interfaces --dry-run   # только показать шаги
+python clear_for_tests.py -e /interfaces/vlan/add -v
+```
+
+| Аргумент | Описание |
+|----------|----------|
+| `-e` / `-d` | Как в `main.py` / `run_tests.py` |
+| `-v` | Подробный лог |
+| `--base-url` | URL API (иначе `API_BASE_URL` из `.env`) |
+| `--tests-dir` | Каталог сценариев (по умолчанию `tests`) |
+| `--log-file` | Явный файл лога |
+| `--timeout` | Таймаут HTTP |
+| `--max-teardown-retry N` | Повторы одного шага (по умолчанию 3) |
+| `--dry-run` | Не слать HTTP, только список шагов |
+
+Шаги сортируются по эвристике приоритета (tunnel/vlan раньше VRF и т.п.).
+
+---
+
+## CLI: прогон (`run_tests.py`)
 
 ```bash
 python run_tests.py -d /interfaces -v
@@ -116,255 +205,385 @@ python run_tests.py --no-recover-already-exists
 
 | Аргумент | Описание |
 |----------|----------|
-| `-e`, `--endpoint` | Эндпоинт(ы) для прогона |
-| `-d`, `--dir` | Префикс пути |
-| `-v`, `--verbose` | Полные тела запросов/ответов в `run.log` |
-| `--base-url URL` | Базовый URL (иначе `API_BASE_URL` из `.env`) |
-| `--tests-dir DIR` | Каталог со сценариями (по умолчанию `tests`) |
-| `--log-file FILE` | Файл лога (по умолчанию `run.log`) |
+| `-e` / `-d` | Какие сценарии гонять |
+| `-v` | Полные тела запросов/ответов в лог |
+| `--base-url URL` | Базовый URL (иначе `API_BASE_URL`) |
+| `--tests-dir DIR` | Каталог JSON (по умолчанию `tests`) |
+| `--log-file FILE` | Явный лог (по умолчанию `logs/run_<datetime>_<scope>.log`) |
 | `--timeout SEC` | Таймаут HTTP (по умолчанию 60) |
 | `--stop-on-failure` | Остановиться после первого FAIL |
-| `--skip-teardown-on-failure` | Не делать teardown при падении setup/main |
+| `--skip-teardown-on-failure` | Не делать teardown, если упал setup/main |
 | `--max-teardown-retry N` | Повторы teardown (по умолчанию 3) |
-| `--recover-already-exists` / `--no-recover-already-exists` | При «already exists»: teardown → повтор (по умолчанию включено) |
+| `--recover-already-exists` / `--no-…` | При «already exists»: teardown → повтор (вкл. по умолчанию) |
 
-В конце `run.log` — итоговая таблица по эндпоинтам (PASS/FAIL, `test_id`).
+В конце лога — итоговая таблица по эндпоинтам: статус, список `test_id` с FAIL.
+
+Порядок внутри сценария:
+
+1. все шаги `setup` (ожидается HTTP 200, если не указано иное);
+2. `main_test`;
+3. все шаги `teardown` (статус не валидируется строго; «not found» считается OK).
 
 ---
 
-## Запуск unit-тестов
+## Unit-тесты
+
+Офлайн, без устройства и без HTTP:
 
 ```bash
-python run_unit_tests.py          # все тесты
-python run_unit_tests.py -v       # подробно
-python -m unittest discover -s unit_tests -v
+python run_unit_tests.py
+python run_unit_tests.py -v
+python run_unit_tests.py -k test_lifecycle.py
 ```
 
 | Модуль | Что проверяет |
 |--------|----------------|
-| `test_schema_preprocess.py` | препроцессинг схемы, minimal payload |
-| `test_payload_generation.py` | покрытие значений, dedupe |
+| `test_schema_preprocess.py` | Препроцессинг схемы, minimal payload |
+| `test_payload_generation.py` | Покрытие значений, dedupe |
 | `test_placeholders.py` | `{{var}}`, dotted-пути |
-| `test_lifecycle.py` | порядок setup/teardown, VID, defer bond |
-| `test_mock_data.py` | секция `mock_data` |
+| `test_lifecycle.py` | Порядок setup/teardown, VID, defer bond |
+| `test_mock_data.py` | Секция `mock_data` |
 | `test_inventory_env.py` | `.env`, инвентарь интерфейсов |
-| `test_dependencies.py` | поиск зависимостей в payload |
-| `test_scalar_delete.py` | авто lifecycle scalar delete |
+| `test_dependencies.py` | field_mappings, endpoint_rules, skip_targets |
+| `test_scalar_delete.py` | Авто lifecycle scalar delete |
 | `test_resolve_scheme.py` | `$ref`, поля схемы |
-| `test_endpoint_discovery.py` | фильтр `-e` / `-d` |
-| `test_runner_helpers.py` | вспомогательная логика раннера |
-| `test_scenario_build.py` | сборка JSON-сценариев |
-| `test_ollama.py` | Ollama без сети |
+| `test_endpoint_discovery.py` | Фильтр `-e` / `-d` |
+| `test_runner_helpers.py` | Вспомогательная логика раннера |
+| `test_scenario_build.py` | Сборка JSON-сценариев |
+| `test_generation_log.py` | Имена файлов логов |
+| `test_clear_for_tests.py` | Дедуп и сортировка teardown |
 | `test_vid_range.py` | VID_RANGE_LIST |
+| `test_ollama.py` | Ollama без сети |
+| `test_interface_schema_lifecycle.py` | Schema-driven lifecycle |
 
-`OK` в конце = все assert прошли. Это **не** заменяет прогон на устройстве.
+`OK` в unit-тестах **не заменяет** прогон на устройстве.
 
 ---
 
-## `.env` — инвентарь и доступ к API
+## Логи
 
-Скопируйте `.env.example` → `.env`. Приоритет значений: `os.environ` → `.env` → `allowed` в `dependencies.json`.
+Все логи пишутся в каталог `logs/` (создаётся автоматически). Формат имени:
 
-### Интерфейсы
+```
+logs/<prefix>_YYYYMMDD_HHMMSS_<scope>.log
+```
 
-Переменные привязываются к правилу в `interface_rules` через поле `"env": "ИМЯ_ПЕРЕМЕННОЙ"`.
+| prefix | Скрипт |
+|--------|--------|
+| `gen` | `main.py` |
+| `run` | `run_tests.py` |
+| `clear` | `clear_for_tests.py` |
+
+| scope | Когда |
+|-------|--------|
+| `all` | Запуск без `-e` и `-d` |
+| `interfaces` | `-d /interfaces` |
+| `dns_client` | `-e /dns/client` |
+
+Примеры:
+
+```
+logs/gen_20260714_091500_interfaces.log
+logs/run_20260714_100952_interfaces.log
+logs/clear_20260714_101000_all.log
+```
+
+Явный путь: `--log-file my.log` (для run/clear). `-v` включает подробный уровень.
+
+`*.log` в `.gitignore` — в git не коммитятся.
+
+---
+
+## Файл `.env`
+
+Скопируйте `.env.example` → `.env` и подставьте значения **вашего** устройства.
+
+### Приоритет источников имён
+
+Для списков интерфейсов:
+
+1. переменная окружения процесса (`os.environ`);
+2. файл `.env`;
+3. поле `"allowed"` в правиле `interface_rules` (если есть).
+
+### Переменные интерфейсов
+
+Каждая переменная привязана к правилу через `"env": "ИМЯ"` в `dependencies.json` → `interface_rules`.
 
 ```env
-# Физические ethernet (pattern ^eth(...)$ без точки)
-DEVICE_ETH_IFNAMES=eth0,eth1
+# Физические ethernet (без точки): eth1
+DEVICE_ETH_IFNAMES=eth1
 
-# Ethernet VLAN: eth1.200 → vid 200 при lifecycle
-DEVICE_ETH_VLAN_IFNAMES=eth0.100,eth1.200
+# Ethernet VLAN: имя eth1.200 → vid выводится как 200
+DEVICE_ETH_VLAN_IFNAMES=eth1.2,eth1.3
 
-# VLAN-интерфейсы (prefix vlan): vlan100 → vid 100
+# VLAN-интерфейсы: vlan100 → vid 100
+# Не используйте vlan0 / vlan1 / vlan4095, если API это запрещает
 DEVICE_VLAN_IFNAMES=vlan100,vlan200
 
 # Switchport
-DEVICE_SWITCHPORT_IFNAMES=switchport1,switchport2
+DEVICE_SWITCHPORT_IFNAMES=switchport2,switchport3
 
-# Bond-интерфейсы (если заданы в enum схемы)
-DEVICE_BOND_IFNAMES=bond0
+# Bond (если нужны фиксированные имена в enum)
+DEVICE_BOND_IFNAMES=bond1
 
-# Пул VID, если имя не содержит vid (bond, br, …)
-VID_RANGE=100-120
+# Пул VID, когда имя само по себе не несёт номер (bond, br, …)
+# Также отсекаются значения вне 1..4094
+VID_RANGE=100-4000
 
-# Списки для QoS / DSCP (если используются в схеме)
+# QoS / DSCP (если поля в схеме матчятся на эти env через interface_rules)
 DSCP_LIST=0,63
 FPRI_LIST=1,2,3
 ```
 
-**Добавить новый тип интерфейса:** правило в `dependencies.json` + строка в `.env`. Код менять не нужно.
+**Зачем инвентарь.** Генератор подменяет широкий OpenAPI-`pattern` на `enum` из ваших имён. Тогда тесты используют реальные порты устройства, а lifecycle знает, как создать `vlan100` / `eth1.2`.
 
-### Доступ к API (для `run_tests.py`)
+**Добавить новый тип интерфейса:** правило в `interface_rules` + строка в `.env`. Код трогать не нужно.
+
+### Доступ к API (для run / clear)
 
 ```env
 API_BASE_URL=https://10.65.5.125:8082
 
-# Один из вариантов авторизации:
+# Достаточно одного варианта авторизации:
 API_USER=admin
-API_PASSWORD=secret
-# API_KEY=your-key
+API_PASSWORD=admin
+# API_KEY=your-api-key
 # API_BEARER_TOKEN=eyJ...
 ```
 
----
+`--base-url` в CLI перекрывает `API_BASE_URL`.
 
-## `mock_data` — предсказуемые значения
+### Практические советы по `.env`
 
-Секция в `dependencies.json`. Ограничивает генерацию **безопасными** значениями вместо случайных IP/имён из JSF.
-
-```json
-"mock_data": {
-  "by_schema": {
-    "IP_ADDR": ["10.0.0.1", "10.0.0.2"],
-    "IP_ADDR_WITH_BIT_MASK": ["10.0.0.1/24", "10.0.0.2/24"],
-    "IPV6_ADDR": ["2001:db8::1"],
-    "IPV6_ADDR_WITH_BIT_MASK": ["2001:db8:1::1/64"]
-  },
-  "by_field": {
-    "vrf_name": ["autotest-vrf-1"],
-    "vrf": ["autotest-vrf-1"],
-    "acl_name": ["autotest-acl-1"]
-  }
-}
-```
-
-| Ключ | Когда использовать |
-|------|-------------------|
-| `by_schema` | Имя компонента OpenAPI (`IP_ADDR`, `VRF`, …) — автоматически для всех полей с таким `pattern` |
-| `by_field` | Конкретное имя поля в payload (`vrf_name`, `acl_name`) |
-
-**Правила:**
-
-- Секция **опциональна** — без неё генерация как раньше (JSF).
-- `by_field` и `by_schema` перезаписывают `enum` из инвентаря интерфейсов (приоритет у `mock_data`).
-- Для IP лучше `by_schema`, не `by_field` на `ip_addr` (IPv4/IPv6 в разных ветках `oneOf`).
-- Значения можно задать списком или строкой через запятую: `"vrf_name": "a,b"`.
-
-Рекомендуемые диапазоны: IPv4 `10.0.0.0/8` или RFC5737 `192.0.2.0/24`, IPv6 `2001:db8::/32`.
+| Ситуация | Что сделать |
+|----------|-------------|
+| `vid 0` / `4095` / vlandb «must be > 1» | Убрать `vlan0`, `vlan1`, `vlan4095` из `DEVICE_VLAN_IFNAMES`; задать `VID_RANGE=2-4094` |
+| Bond enslave «Network is down» | Поднять parent в lifecycle (`/interfaces/shutdown` с `adm_state: true`) и перечислить реальные `eth1.N` |
+| Blink / eth-only API | Оставить в `DEVICE_ETH_IFNAMES` только NIC, который поддерживает операцию |
+| Разные стенды | Держать разные `.env` (не коммитить боевой `.env`) |
 
 ---
 
-## `dependencies.json` — зависимости и lifecycle
+## `dependencies.json` — обзор
 
-Файл описывает, какие HTTP-запросы добавить в `setup` / `teardown` каждого сценария.
+Единственный конфиг «что создать до теста и что удалить после». Код **не** знает про конкретные `/dns/...` или bond-режимы — всё описывается здесь.
 
-### Структура
+### Корневые секции
 
 ```json
 {
   "field_mappings": { },
-  "interface_rules": { },
   "endpoint_rules": { },
+  "interface_rules": { },
+  "interface_lifecycle": { },
+  "synthetic_bind_fields": { },
   "mock_data": { }
 }
 ```
 
-| Раздел | Когда срабатывает |
+| Секция | Когда срабатывает |
 |--------|-------------------|
-| `field_mappings` | В payload есть ключ (`vrf_name`, `primary_interface`, `acl_name`, …) |
-| `interface_rules` | Строковое поле подходит под `pattern` / `prefix` (`ifname`, вложенные) |
-| `endpoint_rules` | Тестируемый эндпоинт + в payload есть `action` |
-| `mock_data` | При генерации (не lifecycle) |
+| `field_mappings` | В payload main_test есть одноимённое поле (`vrf_name`, `zone_name`, `primary_interface`, …) |
+| `interface_rules` | Строковое значение подходит под `pattern` / `prefix` правила (`ifname`, вложенные поля) |
+| `endpoint_rules` | Ключ = тестируемый эндпоинт; setup/teardown по `action` или `lifecycle_key_field` |
+| `interface_lifecycle` | Какие schema-компоненты (`IFNAME`, …) искать как «интерфейсные» поля |
+| `synthetic_bind_fields` | Для `delete`/`modify` без поля в payload — подтянуть lifecycle из `field_mappings` + `mock_data` |
+| `mock_data` | При генерации пейлоадов: фиксированные enum вместо случайных JSF-значений |
 
-### Единая модель lifecycle
+---
 
-| Фаза | Ключи |
-|------|-------|
-| Setup (до main) | `setup` или `create` |
-| Teardown (после main) | `teardown` или `delete` |
+## Формат lifecycle-шага
 
-**Простой формат:**
+Во всех секциях используется одна модель.
 
-```json
-"create": "/interfaces/bonding/add",
-"delete": "/interfaces/bonding/delete"
-```
-
-**Кастомный шаг:**
+### Короткий вид (только пути)
 
 ```json
 {
-  "endpoint": "/vrf",
-  "method": "POST",
-  "payload": { "action": "add", "vrf_name": "{{vrf_name}}" },
-  "expected_status": 200,
-  "note": "Создать VRF",
-  "extract_to_variable": "created_vrf_name",
-  "response_extract": "data.vrf_name"
-}
-```
-
-Любой ключ может быть **объектом или списком** шагов.
-
-### Плейсхолдеры
-
-| Переменная | Источник |
-|------------|----------|
-| `{{ifname}}`, `{{vrf_name}}`, … | Значение из `main_test.payload` |
-| `{{vid}}`, `{{vlan}}` | Из имени интерфейса (`vlan100` → 100) или `VID_RANGE` в `.env` |
-| `{{settings.source}}` | Dotted-путь в payload main_test |
-| `{{created_pool}}` | Из ответа setup (`extract_to_variable`) |
-
-Неразрешённый плейсхолдер остаётся в JSON как есть.
-
-### Приоритеты setup и teardown
-
-**Setup** сортируется автоматически:
-
-| Фаза | Примеры |
-|------|---------|
-| `prerequisite` (10) | VRF, DHCP pool |
-| `interface` (20) | eth_vlan/add, bond/add |
-| `field` (30) | enslave, ACL |
-| `endpoint` (40) | endpoint_rules |
-| `auto` (50) | scalar delete setup |
-
-Внутри фазы шаги с `…/add` идут раньше (`shutdown`, `capability`, …).
-
-Явный приоритет в JSON:
-
-```json
-"teardown_priority": 10,
-"setup_priority": 15
-```
-
-**Teardown:** меньше число → раньше. По умолчанию: интерфейсы `10`, обычные поля `50`, prerequisite (VRF) `100`.
-
-### `setup_defer` для bond
-
-```json
-{
-  "prefix": "bond",
-  "setup_defer": true,
   "create": "/interfaces/bonding/add",
   "delete": "/interfaces/bonding/delete"
 }
 ```
 
-Bond создаётся **после** eth_vlan / vlan slave-интерфейсов.
+Генератор сам соберёт payload с `{{ifname}}` (и при необходимости `{{vid}}`).
 
-### VID и vlandb
-
-В setup для vlan/eth_vlan используйте `"vid": "{{vid}}"`, не фиксированное число:
+### Полный шаг
 
 ```json
-"setup": {
-  "endpoint": "/interfaces/eth_vlan/add",
+{
+  "endpoint": "/vrf",
+  "method": "POST",
   "payload": {
-    "ifname": "{{ifname}}",
-    "vid": "{{vid}}"
+    "action": "add",
+    "vrf_name": "{{vrf_name}}"
+  },
+  "expected_status": 200,
+  "note": "Создать VRF до теста",
+  "extract_to_variable": "created_vrf_name",
+  "response_extract": "data.vrf_name",
+  "setup_priority": 15
+}
+```
+
+| Поле | Описание |
+|------|----------|
+| `endpoint` | POST-путь |
+| `method` | Обычно `POST` |
+| `payload` | Тело; плейсхолдеры `{{…}}` подставляются при генерации |
+| `expected_status` | Только для setup (по умолчанию 200) |
+| `note` | Комментарий в JSON-сценарии |
+| `extract_to_variable` | Имя переменной из ответа setup |
+| `response_extract` | Путь в ответе (`data.vrf_name`) |
+| `setup_priority` / `teardown_priority` | Явный порядок (см. ниже) |
+
+`setup` / `teardown` могут быть **одним объектом или списком** шагов.
+
+Синонимы: `setup` ≈ `create`, `teardown` ≈ `delete`.
+
+---
+
+## Плейсхолдеры `{{…}}`
+
+| Пример | Откуда значение |
+|--------|-----------------|
+| `{{ifname}}`, `{{vrf_name}}`, `{{zone_name}}` | Поле из `main_test.payload` (рекурсивный обход) |
+| `{{vid}}`, `{{vlan}}` | Из имени (`vlan100` → 100, `eth1.200` → 200) или из пула `VID_RANGE` |
+| `{{settings.source}}` | Dotted-путь в payload |
+| `{{created_vrf_name}}` | Значение, сохранённое setup через `extract_to_variable` |
+| `{{primary_interface}}` | То же поле из payload / bind |
+
+Если плейсхолдер не удалось разрешить, он **остаётся** в JSON как строка `{{…}}` — смотрите лог генерации.
+
+Для `endpoint_rules` список нужных ключей задаётся в `bind_fields`. Недостающие можно добить из `mock_data.by_field`.
+
+---
+
+## Порядок setup / teardown
+
+### Setup (меньше число → раньше)
+
+Фазы по умолчанию:
+
+| Фаза | Приоритет | Примеры |
+|------|-----------|---------|
+| `interface` | 5 | `vlan/add`, `eth_vlan/add`, `tunnel/add` |
+| `prerequisite` | 10 | VRF, DHCP pool, create на **другом** эндпоинте |
+| `field` | 30 | enslave, ACL из `field_mappings` |
+| `endpoint` | 40 | шаги из `endpoint_rules` |
+| `auto` | 50 | авто scalar-delete setup |
+
+Внутри одной фазы шаги с `…/add` идут раньше (`capability`, `shutdown`, …).
+
+Явно: `"setup_priority": 15` в шаге или в конфиге поля.
+
+Bond с `"setup_defer": true` создаётся **после** slave-интерфейсов (eth_vlan / vlan), чтобы enslave был возможен.
+
+### Teardown (меньше число → раньше)
+
+| Тип | По умолчанию |
+|-----|--------------|
+| Интерфейсы (bond, vlan, tunnel, …) | `10`–`11` |
+| Обычные поля | `50` |
+| Prerequisite (VRF и т.п.) | `100` |
+
+Явно: `"teardown_priority": 10`. Сначала сносятся зависимости интерфейсов, потом сам VRF.
+
+### Self-skip
+
+Если endpoint шага setup **совпадает** с тестируемым эндпоинтом — шаг пропускается (ресурс создаёт `main_test`). Исключение: `main_test` с `action: delete` (нужен предварительный create).
+
+Принудительно оставить setup даже при совпадении пути: `"requirements": ["setup", "teardown"]`.
+
+### Auto vlandb
+
+Если в `endpoint_rules` описан `/interfaces/switchport/vlandb` (шаблоны add/delete), при создании vlan/eth_vlan генератор **сам** добавляет:
+
+- setup: `vlandb` action add для того же `{{vid}}`;
+- teardown: `vlandb` action delete.
+
+В шаблоне vlan setup пишите `"vid": "{{vid}}"`, не литерал.
+
+### Auto scalar delete
+
+Если в схеме `action.add` — object, а `action.delete` — скаляр (например только `pool_number`), генератор сам добавит create-before-delete на том же эндпоинте. В JSON настраивать не нужно.
+
+---
+
+## `field_mappings`
+
+Срабатывает, когда в payload есть ключ с таким именем.
+
+```json
+"field_mappings": {
+  "vrf_name": {
+    "teardown_priority": 100,
+    "optional": true,
+    "setup": {
+      "endpoint": "/vrf",
+      "method": "POST",
+      "payload": {
+        "action": "add",
+        "vrf_name": "{{vrf_name}}"
+      },
+      "extract_to_variable": "created_vrf_name",
+      "response_extract": "data.vrf_name"
+    },
+    "teardown": {
+      "endpoint": "/vrf",
+      "method": "POST",
+      "payload": {
+        "action": "delete",
+        "vrf_name": "{{vrf_name}}"
+      }
+    }
   }
 }
 ```
 
-Если в `endpoint_rules` описан `/interfaces/switchport/vlandb`, генератор **автоматически** добавляет `vlandb add` перед созданием VLAN и `vlandb delete` в teardown для того же `{{vid}}`.
+### Полезные флаги
 
-### Self-skip setup
+| Поле | Смысл |
+|------|--------|
+| `optional: true` | Не добавлять lifecycle, если значение пустое / отсутствует |
+| `teardown_priority` | Порядок удаления |
+| `requirements` | `["setup","teardown"]` — всегда, даже при self-skip |
+| `skip_targets` | Список эндпоинтов, для которых mapping **не** применять |
+| `extract` | Legacy-путь извлечения (`data.<field>`) |
 
-Если endpoint шага setup совпадает с тестируемым эндпоинтом — шаг пропускается (ресурс создаётся в `main_test`). Исключение: `main_test.action == "delete"`.
+### `skip_targets`
 
-### field_mappings
+Нужен, когда глобальный mapping мешает «родным» операциям поля.
+
+```json
+"zone_name": {
+  "skip_targets": [
+    "/dns/server/zone/master/add",
+    "/dns/server/zone/slave/*"
+  ],
+  "setup": { "...": "создать master-зону" },
+  "teardown": { "...": "удалить зону" }
+}
+```
+
+- точное совпадение: `/dns/server/zone/master/add`;
+- префикс: `/dns/server/zone/slave/*` (звёздочка только в конце).
+
+Иначе перед `slave/add` генератор создал бы master-зону с тем же именем → конфликт.
+
+### Action-aware поведение
+
+Если lifecycle уходит на **тот же** эндпоинт, что и тест:
+
+| `action` в main | Что добавляется |
+|-----------------|-----------------|
+| `add` | только teardown |
+| `delete` | только setup |
+| `modify` | setup + teardown |
+
+Если setup/teardown на **другом** эндпоинте (prerequisite, VRF) — добавляются обе фазы.
+
+### Пример: bonding enslave
 
 ```json
 "primary_interface": {
@@ -386,34 +605,28 @@ Bond создаётся **после** eth_vlan / vlan slave-интерфейс�
 }
 ```
 
-| Поле | Описание |
-|------|----------|
-| `optional` | Не добавлять lifecycle, если значение пустое |
-| `teardown_priority` | Порядок в teardown |
-| `extract` | Путь в ответе setup (legacy: `data.<field>`) |
+---
 
-**Action-aware lifecycle** (когда в main_test есть `action`):
+## `interface_rules`
 
-| `main_test.action` | На том же эндпоинте | Prerequisite (другой эндпоинт) |
-|--------------------|---------------------|--------------------------------|
-| `add` | только teardown | setup + teardown |
-| `delete` | только setup | setup + teardown |
-| `modify` | setup + teardown | setup + teardown |
+Описывает, **как создавать/удалять интерфейс по его имени**. Поиск рекурсивный: `ifname`, `mode.primary_interface`, `port[].ifname`, …
 
-### interface_rules
-
-Поиск **рекурсивный**: `ifname`, `mode.primary_interface`, `port[].ifname`. Первое совпавшее правило сверху вниз.
+Правила проверяются **сверху вниз** — более специфичные (eth_vlan) ставьте **выше** общих (`^eth…$` без точки).
 
 ```json
 "interface_rules": {
   "ifname": {
     "rules": [
       {
-        "pattern": "^eth(0|[1-9][0-9]{0,3})\\.(0|[1-9][0-9]{0,3})$",
+        "pattern": "^eth[0-9]+\\.[0-9]+$",
         "env": "DEVICE_ETH_VLAN_IFNAMES",
+        "teardown_priority": 11,
         "setup": {
           "endpoint": "/interfaces/eth_vlan/add",
-          "payload": { "ifname": "{{ifname}}", "vid": "{{vid}}" }
+          "payload": {
+            "ifname": "{{ifname}}",
+            "vid": "{{vid}}"
+          }
         },
         "teardown": [{
           "endpoint": "/interfaces/eth_vlan/delete",
@@ -426,25 +639,90 @@ Bond создаётся **после** eth_vlan / vlan slave-интерфейс�
         "teardown_priority": 10,
         "create": "/interfaces/bonding/add",
         "delete": "/interfaces/bonding/delete"
+      },
+      {
+        "prefix": "vlan",
+        "env": "DEVICE_VLAN_IFNAMES",
+        "teardown_priority": 11,
+        "setup": {
+          "endpoint": "/interfaces/vlan/add",
+          "payload": {
+            "ifname": "{{ifname}}",
+            "vid": "{{vid}}"
+          }
+        },
+        "teardown": [{
+          "endpoint": "/interfaces/vlan/delete",
+          "payload": { "ifname": "{{ifname}}" }
+        }]
       }
     ]
   }
 }
 ```
 
-| Поле | Описание |
-|------|----------|
+| Поле правила | Описание |
+|--------------|----------|
 | `pattern` | Regex полного совпадения имени |
-| `prefix` | Имя начинается с `bond`, `vlan`, `tunnel`, … |
-| `env` / `allowed` | Список имён для enum в схеме |
-| `physical` | Без lifecycle, если нет teardown |
-| `requirements` | `["setup", "teardown"]` — принудительно, даже при self-skip |
+| `prefix` | Имя начинается с `bond` / `vlan` / `tunnel` / … |
+| `env` | Имя переменной в `.env` → enum в схеме |
+| `allowed` | Список имён прямо в JSON (fallback без `.env`) |
+| `setup` / `teardown` / `create` / `delete` | Lifecycle |
+| `setup_defer` | Отложить create (bond после slave) |
+| `teardown_priority` | Порядок удаления |
+| `requirements` | Принудительный lifecycle |
+| `physical` | Физический порт без create (иногда только reset в teardown) |
 
-Если в `.env` есть `eth1.1`, генератор **исключает** родительский `eth1` из enum для bonding `primary_interface` (нельзя enslave родителя с VLAN-дочерними).
+Если в инвентаре есть `eth1.1`, родительский `eth1` обычно **исключается** из enum для bonding `primary_interface` (нельзя enslave родителя при существующих VLAN-дочерних) — это поведение генератора по inventory.
 
-### endpoint_rules
+Тот же механизм `pattern` + `env` используется и для не-интерфейсных списков (`VID_RANGE`, `DSCP_LIST`, …), если правило так настроено.
 
-Для эндпоинтов с `action` в payload:
+---
+
+## `endpoint_rules`
+
+Правила привязаны к **тестируемому пути**, а не к имени поля.
+
+### Структура
+
+```json
+"/dns/server/zone/master/entry/delete": {
+  "lifecycle_key_field": "entry_type",
+  "bind_fields": ["zone_name", "entry_name", "entry_type", "ip_address", "priority"],
+  "a": {
+    "setup": {
+      "endpoint": "/dns/server/zone/master/entry/add",
+      "payload": {
+        "zone_name": "{{zone_name}}",
+        "entry": {
+          "entry_name": "{{entry_name}}",
+          "entry_params": {
+            "entry_type": "a",
+            "ip_address": "{{ip_address}}"
+          }
+        }
+      }
+    }
+  },
+  "aaaa": { "setup": { "...": "…" } },
+  "mx": { "setup": { "...": "…" } }
+}
+```
+
+### Как выбирается блок lifecycle
+
+1. **Top-level** `setup` / `teardown` у правила — применяются **всегда**.
+2. Дополнительно — блок по ключу:
+   - если есть `action` в payload → блоки `add` / `delete` / `modify` / …;
+   - иначе, если задан `lifecycle_key_field` → значение этого поля (`entry_type=a` → блок `"a"`).
+
+Плоский action вроде `"action": "add first"` тоже может быть ключом блока (как строка в `endpoint_rules`).
+
+### `bind_fields`
+
+Список имён, которые нужно вытащить из payload (включая вложенные) для плейсхолдеров. Если поля нет в payload — берётся первое значение из `mock_data.by_field`.
+
+### Пример: vlandb
 
 ```json
 "/interfaces/switchport/vlandb": {
@@ -464,49 +742,154 @@ Bond создаётся **после** eth_vlan / vlan slave-интерфейс�
 }
 ```
 
-### Авто lifecycle: scalar delete
+### Пример: always-on top-level + action
 
-Если в схеме `action.add` — object, а `action.delete` — скаляр (например `pool_number`), генератор сам добавляет setup/teardown на том же эндпоинте. Настраивать в JSON не нужно.
+```json
+"/dns/client": {
+  "setup": { "...": "общие шаги до любого теста" },
+  "teardown": { "...": "общие шаги после" },
+  "add first": {
+    "teardown": { "...": "только для action=add first" }
+  }
+}
+```
 
 ---
 
-## Формат выходного теста
+## `mock_data`
+
+Ограничивает генерацию **предсказуемыми** значениями вместо случайных IP/строк JSF.
+
+```json
+"mock_data": {
+  "by_schema": {
+    "IP_ADDR": ["10.0.0.1", "10.0.0.2"],
+    "IP_ADDR_WITH_BIT_MASK": ["10.0.0.1/32", "10.0.0.2/32"],
+    "IPV6_ADDR": ["2001:db8::1"],
+    "IPV6_ADDR_WITH_BIT_MASK": ["2001:db8:1::1/64"]
+  },
+  "by_field": {
+    "vrf_name": ["vrf1", "vrf2"],
+    "acl_name": ["acl1"],
+    "description": ["", "autotest-desc"],
+    "zone_name": ["zone1", "zone2"]
+  }
+}
+```
+
+| Ключ | Когда |
+|------|--------|
+| `by_schema` | Имя компонента OpenAPI (`IP_ADDR`, …) — по `pattern` поля |
+| `by_field` | Имя свойства в схеме (`vrf_name`, `description`) |
+
+**Правила:**
+
+- секция опциональна;
+- `mock_data` имеет **приоритет** над enum из инвентаря интерфейсов;
+- значения: список или строка через запятую (`"vrf_name": "a,b"`);
+- для IP лучше `by_schema`, а не `by_field` на `ip_addr` (IPv4/IPv6 в разных ветках `oneOf`);
+- если API требует `/32` для tunnel peer — задайте это в `IP_ADDR_WITH_BIT_MASK`, а не правьте код;
+- безопасные диапазоны: `10.0.0.0/8`, RFC5737 `192.0.2.0/24`, IPv6 `2001:db8::/32`.
+
+После правок `mock_data` нужна **перегенерация**: `python main.py -d …`.
+
+---
+
+## `interface_lifecycle` и `synthetic_bind_fields`
+
+### `interface_lifecycle`
+
+Указывает, какие `$ref`-компоненты схемы считать «именем интерфейса» и гонять через `interface_rules`:
+
+```json
+"interface_lifecycle": {
+  "schema_components": [
+    "IFNAME",
+    "interfaces_ethernet_ifname",
+    "interfaces_eth_vlan_ifname",
+    "interfaces_vlan_ifname"
+  ],
+  "rules_key": "ifname",
+  "exclude_fields": ["jail_name"]
+}
+```
+
+- `"enabled": false` — отключить schema-driven поиск (останется только поиск по ключам правил);
+- `exclude_fields` — не считать эти имена interface-lifecycle (например `jail_name`).
+
+### `synthetic_bind_fields`
+
+Для эндпоинтов, где `delete`/`modify` **не** кладут идентификатор в payload (он уже на устройстве), но lifecycle нужен:
+
+```json
+"synthetic_bind_fields": {
+  "/acl/filter/filter_ipv4": ["acl_name"]
+}
+```
+
+Генератор возьмёт `acl_name` из `mock_data.by_field` и применит `field_mappings.acl_name` (setup перед delete).
+
+---
+
+## Формат сгенерированного теста
 
 ```json
 {
   "test_id": 1,
-  "coverage_keys": ["ifname=\"bond0\""],
-  "setup": [ { "endpoint": "...", "method": "POST", "payload": {}, "expected_status": 200 } ],
+  "coverage_keys": ["ifname=\"bond0\"", "mode.mode_type=\"balance-rr\""],
+  "setup": [
+    {
+      "endpoint": "/interfaces/bonding/add",
+      "method": "POST",
+      "payload": { "ifname": "bond0" },
+      "expected_status": 200
+    }
+  ],
   "main_test": {
     "endpoint": "/interfaces/bonding/mode",
     "method": "POST",
-    "payload": { "ifname": "bond0", "mode": { "mode_type": "balance-rr" } },
+    "payload": {
+      "ifname": "bond0",
+      "mode": { "mode_type": "balance-rr" }
+    },
     "expected_status": 200
   },
-  "teardown": [ { "endpoint": "...", "method": "POST", "payload": {} } ],
+  "teardown": [
+    {
+      "endpoint": "/interfaces/bonding/delete",
+      "method": "POST",
+      "payload": { "ifname": "bond0" }
+    }
+  ],
   "description": "Auto-test: POST /interfaces/bonding/mode"
 }
 ```
 
-Имя файла: `tests/interfaces_bonding_mode_post.json`.
+`coverage_keys` — что именно этот сценарий покрывает (для анализа FAIL). Руками править JSON в `tests/` обычно не нужно: правите dependencies / `.env` и перегенерируйте.
 
 ---
 
-## Логирование
+## Как работает генерация (pipeline)
 
-| Файл | Программа | Содержимое |
-|------|-----------|------------|
-| `test.log` | `main.py` | Покрытие полей, mock_data, self-skip, инвентарь |
-| `run.log` | `run_tests.py` | HTTP-запросы, PASS/FAIL, итоговая таблица |
+```
+openapi.json
+  → discover POST endpoints (-e / -d)
+  → ResolveScheme.resolve_endpoint()      # развернуть $ref
+  → preprocess_schema_for_jsf()           # oneOf/const → enum, nullable
+  → apply_interface_inventory()           # pattern → enum из .env
+  → apply_mock_data()                     # by_schema / by_field → enum
+  → generate_value_coverage_payloads()    # enum, boolean, min/max, + JSF
+  → build_test_scenarios()                # setup / teardown из dependencies
+       1. prerequisite field_mappings
+       2. interface_rules (+ defer bond)
+       3. прочие field_mappings
+       4. endpoint_rules (+ auto vlandb)
+       5. auto scalar delete
+       6. сортировка setup / teardown
+  → tests/.../*.json
+```
 
-`-v` включает подробный вывод (DEBUG / полные тела).
-
-Полезные строки в `test.log`:
-
-- `mock_data: by_schema=N, by_field=M`
-- `Покрытие значений: N пейлоадов, целей X/Y`
-- `Self-skip setup: …`
-- `Инвентарь для pattern …`
+Параллельный режим (`--workers`): каждый эндпоинт — отдельный процесс; логи воркеров дописываются в общий `logs/gen_*.log`.
 
 ---
 
@@ -520,45 +903,60 @@ python main.py --ollama --ollama-features describe
 | Фича | Назначение |
 |------|------------|
 | `describe` | Человекочитаемые `description` в сценариях |
-| `enrich` | Подстановка осмысленных строк вместо JSF-заглушек |
+| `enrich` | Более осмысленные строки вместо JSF-мусора |
 
-Требуется локальный Ollama. Без `--ollama` используются шаблонные описания.
+Нужен локальный Ollama. Без `--ollama` — шаблонные описания `Auto-test: POST …`.
 
 ---
 
-## Типичные задачи
+## Типичные задачи и чеклисты
 
-| Задача | Действие |
-|--------|----------|
-| Новый эндпоинт в OpenAPI | `python main.py -e /новый/путь` |
-| Тест ломает VRF/ACL | Добавить `field_mappings` |
-| Нужны безопасные IP | Секция `mock_data` |
-| Создаваемый интерфейс (bond, tunnel) | `interface_rules`: `prefix` + `create`/`delete` |
-| Bond после slave VLAN | `"setup_defer": true` на bond |
+### Шпаргалка
+
+| Задача | Куда смотреть |
+|--------|----------------|
+| Новый эндпоинт в OpenAPI | `python main.py -e /path` |
+| Тест требует VRF / ACL / jail | `field_mappings` + `mock_data.by_field` |
+| Безопасные IP / маски | `mock_data.by_schema` |
+| Создаваемый ifname (bond, tunnel, vlan) | `interface_rules` + `.env` |
+| Bond после VLAN-slave | `"setup_defer": true` на bond |
 | Порядок teardown | `teardown_priority` (меньше → раньше) |
-| Эндпоинт с `action` | `endpoint_rules` |
-| Проверить генератор без API | `python run_unit_tests.py -v` |
-| Прогон на устройстве | `python run_tests.py -d /interfaces -v` |
+| Эндпоинт с `action` или `entry_type` | `endpoint_rules` + `bind_fields` / `lifecycle_key_field` |
+| Mapping мешает своему add | `skip_targets` |
+| Delete без поля в payload | `synthetic_bind_fields` + `mock_data` |
+| Предочистка устройства | `clear_for_tests.py -d …` |
+| Проверить генератор без API | `run_unit_tests.py -v` |
 
-### Чеклист: новая зависимость
+### Чеклист: поле в payload (VRF, zone, ACL)
 
-**Поле в payload (VRF, ACL):**
+1. Ключ в `field_mappings` с `setup` / `teardown`.
+2. Значения в `mock_data.by_field`.
+3. При необходимости `optional`, `teardown_priority`, `skip_targets`.
+4. `python main.py -e /ваш/эндпоинт` и прогон одного теста.
 
-1. Ключ в `field_mappings` с `setup`/`teardown`.
-2. `optional: true`, если поле может отсутствовать.
-3. `python main.py -e /ваш/эндпоинт`.
+### Чеклист: интерфейс
 
-**Интерфейс:**
+1. Правило в `interface_rules.ifname.rules` (специфичные выше).
+2. Строка в `.env` (`env`) или `allowed`.
+3. Для VLAN/eth_vlan: `"vid": "{{vid}}"`.
+4. Убедиться, что `interface_lifecycle.schema_components` покрывает `$ref` поля.
 
-1. Правило в `interface_rules.ifname.rules` (специфичные **выше** общих).
-2. Строка в `.env` с `env`.
-3. Для VLAN: `"vid": "{{vid}}"`.
+### Чеклист: эндпоинт с action
 
-**Эндпоинт с action:**
-
-1. Ключ в `endpoint_rules`.
+1. Ключ в `endpoint_rules` (полный путь).
 2. `bind_fields` для плейсхолдеров.
-3. Блоки `add` / `delete` / `modify`.
+3. Блоки `add` / `delete` / `modify` или top-level setup/teardown.
+4. Если ветвление не по `action` — `lifecycle_key_field`.
+
+### Чеклист: после FAIL на устройстве
+
+1. В `logs/run_*.log` найти `Result: FAIL` и текст `errCode`.
+2. Классифицировать: плохие значения → `mock_data` / `.env`; не хватает ресурса → `field_mappings` / `endpoint_rules` / `interface_rules`.
+3. Поправить JSON / `.env`.
+4. Перегенерировать только нужную группу (`-d` / `-e`).
+5. `clear_for_tests` при необходимости → снова `run_tests`.
+
+**Не** чинить конкретные эндпоинты в Python — расширяйте конфиг.
 
 ---
 
@@ -566,6 +964,12 @@ python main.py --ollama --ollama-features describe
 
 | Пакет | Зачем |
 |-------|-------|
-| `jsf` | Генерация по JSON Schema |
+| `jsf` | Генерация значений по JSON Schema |
 | `jsonschema` | Валидация пейлоадов |
-| `requests` | HTTP в `run_tests.py` и Ollama |
+| `requests` | HTTP в `run_tests.py`, `clear_for_tests.py`, Ollama |
+
+```bash
+pip install jsf jsonschema requests
+```
+
+Python 3.10+ (используются `list[str] | None`, `match` и т.п.).
