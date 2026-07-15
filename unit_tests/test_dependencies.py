@@ -8,9 +8,11 @@ from pathlib import Path
 
 from main import (
     PayloadCoverage,
+    _as_lifecycle_list,
     _fill_bind_fields_from_mock_data,
     _get_endpoint_rules,
     _inject_synthetic_field_dependencies,
+    _should_skip_endpoint_rules_lifecycle_step,
     _should_skip_field_mapping,
     _target_matches_skip_pattern,
     build_test_scenarios,
@@ -62,6 +64,107 @@ class EndpointRulesTests(unittest.TestCase):
 
     def test_get_endpoint_rules_missing(self):
         self.assertIsNone(_get_endpoint_rules("/unknown", {}))
+
+    def test_prefix_merge_applies_to_child_endpoint(self):
+        rules = {
+            "/telnet": {
+                "bind_fields": ["vrf_name"],
+                "setup": {
+                    "endpoint": "/telnet/add",
+                    "method": "POST",
+                    "payload": {"vrf_name": "{{vrf_name}}"},
+                },
+            },
+            "/telnet/port": {
+                "teardown": {
+                    "endpoint": "/telnet/delete",
+                    "method": "POST",
+                    "payload": {"vrf_name": "{{vrf_name}}"},
+                },
+            },
+        }
+        result = _get_endpoint_rules("/telnet/port", rules)
+        self.assertEqual(result["bind_fields"], ["vrf_name"])
+        self.assertEqual(result["setup"]["endpoint"], "/telnet/add")
+        self.assertEqual(result["teardown"]["endpoint"], "/telnet/delete")
+
+    def test_prefix_merge_dedupes_identical_setup(self):
+        step = {
+            "endpoint": "/telnet/add",
+            "method": "POST",
+            "payload": {"vrf_name": "{{vrf_name}}"},
+        }
+        rules = {
+            "/telnet": {"setup": step},
+            "/telnet/delete": {"setup": step},
+        }
+        result = _get_endpoint_rules("/telnet/delete", rules)
+        self.assertEqual(_as_lifecycle_list(result["setup"]), [step])
+
+    def test_prefix_applies_only_to_descendants(self):
+        rules = {
+            "/telnet": {
+                "setup": {
+                    "endpoint": "/telnet/add",
+                    "method": "POST",
+                    "payload": {},
+                },
+            },
+        }
+        self.assertIsNotNone(_get_endpoint_rules("/telnet/port", rules))
+        self.assertIsNone(_get_endpoint_rules("/teleport/port", rules))
+        # exact key /telnet — прямое совпадение (если такой POST есть в openapi)
+        self.assertIsNotNone(_get_endpoint_rules("/telnet", rules))
+
+    def test_nested_prefix_merge_parent_before_child(self):
+        rules = {
+            "/dns/server": {
+                "bind_fields": ["vrf_name"],
+                "setup": {
+                    "endpoint": "/dns/server/control",
+                    "method": "POST",
+                    "payload": {"action": "on"},
+                },
+            },
+            "/dns/server/zone/master/add": {
+                "bind_fields": ["zone_name"],
+                "teardown": {
+                    "endpoint": "/dns/server/zone/master/delete",
+                    "method": "POST",
+                    "payload": {"zone_name": "{{zone_name}}"},
+                },
+            },
+        }
+        result = _get_endpoint_rules("/dns/server/zone/master/add", rules)
+        self.assertEqual(
+            result["bind_fields"],
+            ["vrf_name", "zone_name"],
+        )
+        self.assertEqual(result["setup"]["endpoint"], "/dns/server/control")
+        self.assertEqual(
+            result["teardown"]["endpoint"],
+            "/dns/server/zone/master/delete",
+        )
+
+    def test_self_skip_same_endpoint_setup_on_add(self):
+        self.assertTrue(_should_skip_endpoint_rules_lifecycle_step(
+            "setup", "/telnet/add", "/telnet/add", None,
+        ))
+
+    def test_self_skip_same_endpoint_teardown_on_delete(self):
+        self.assertTrue(_should_skip_endpoint_rules_lifecycle_step(
+            "teardown", "/telnet/delete", "/telnet/delete", None,
+        ))
+
+    def test_keep_prefix_setup_for_config_endpoint(self):
+        self.assertFalse(_should_skip_endpoint_rules_lifecycle_step(
+            "setup", "/telnet/add", "/telnet/port", None,
+        ))
+
+    def test_keep_setup_on_delete_for_action_api(self):
+        self.assertFalse(_should_skip_endpoint_rules_lifecycle_step(
+            "setup", "/datetime/dst", "/datetime/dst", "delete",
+        ))
 
 
 class BindFieldsTests(unittest.TestCase):

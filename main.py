@@ -165,6 +165,28 @@ def _write_generation_summary(started_at: float, endpoint_count: int) -> None:
 # =============================================================================
 # ПРЕПРОЦЕССИНГ СХЕМЫ ДЛЯ JSF
 # =============================================================================
+def _infer_json_schema_type_from_consts(consts: list) -> str | None:
+    """Тип схемы из значений const (oneOf[const,…] → enum)."""
+    if not consts:
+        return None
+    py_types = {type(value) for value in consts}
+    if py_types == {bool} or (py_types <= {bool} and bool in py_types):
+        # bool раньше int: isinstance(True, int) == True в Python
+        if all(isinstance(value, bool) for value in consts):
+            return "boolean"
+    if py_types <= {int, bool} and all(isinstance(v, int) and not isinstance(v, bool) for v in consts):
+        return "integer"
+    if py_types <= {int, float, bool} and all(
+        isinstance(v, (int, float)) and not isinstance(v, bool) for v in consts
+    ):
+        return "number"
+    if py_types == {str}:
+        return "string"
+    if py_types == {type(None)}:
+        return "null"
+    return None
+
+
 def preprocess_schema_for_jsf(schema: dict) -> dict:
     if not isinstance(schema, dict):
         return schema
@@ -186,8 +208,15 @@ def preprocess_schema_for_jsf(schema: dict) -> dict:
             if is_all_consts and consts:
                 new_schema['enum'] = consts
                 del new_schema[keyword]
-                new_schema.setdefault('type', 'string')
-                logger.debug(f"{keyword} с const → enum: {consts}")
+                # type по типу const: иначе 1024 + type:string → всегда FAIL
+                if 'type' not in new_schema:
+                    inferred = _infer_json_schema_type_from_consts(consts)
+                    if inferred:
+                        new_schema['type'] = inferred
+                logger.debug(
+                    f"{keyword} с const → enum: {consts}"
+                    + (f", type={new_schema.get('type')}" if new_schema.get('type') else "")
+                )
             else:
                 has_null = any(isinstance(o, dict) and o.get('type') == 'null' for o in options)
                 non_null_opts = [o for o in options if not (isinstance(o, dict) and o.get('type') == 'null')]
@@ -401,9 +430,23 @@ def _coerce_payload_to_schema(value, schema: dict):
 
     if 'oneOf' in schema:
         if isinstance(value, dict):
-            for branch in schema['oneOf']:
-                if isinstance(branch, dict) and branch.get('type') == 'null':
-                    continue
+            # Не прогоняем payload через ВСЕ ветки — только через совместимую
+            branch = None
+            for field_name, field_value in value.items():
+                branch = _find_oneof_branch_for_field(schema, field_name, field_value)
+                if branch is not None and _branch_accepts_field_value(
+                    branch, field_name, field_value,
+                ):
+                    break
+            if branch is None:
+                branch = next(
+                    (
+                        b for b in schema['oneOf']
+                        if isinstance(b, dict) and b.get('type') != 'null'
+                    ),
+                    None,
+                )
+            if branch is not None:
                 value = _coerce_payload_to_schema(value, branch)
         return value
 
@@ -496,7 +539,10 @@ def _schema_at_path(schema: dict, path: str) -> dict | None:
 
 
 def _find_oneof_branch_for_field(schema: dict, field_name: str, field_value=None) -> dict | None:
-    """Находит ветку oneOf/anyOf, которой принадлежит поле (с учётом const/enum)."""
+    """
+    Находит ветку oneOf/anyOf для поля.
+    Учитывает const/enum в ветке (discriminated unions: key_type=rsa|dsa|…).
+    """
     candidates = []
     for branch in _iter_schema_branches(schema):
         props = branch.get('properties', {})
@@ -509,15 +555,68 @@ def _find_oneof_branch_for_field(schema: dict, field_name: str, field_value=None
         return candidates[0]
 
     if field_value is not None:
-        for branch in candidates:
-            prop_schema = branch.get('properties', {}).get(field_name, {})
-            if 'const' in prop_schema and prop_schema['const'] != field_value:
-                continue
-            if 'enum' in prop_schema and field_value not in prop_schema['enum']:
-                continue
-            return branch
+        matching = [
+            branch for branch in candidates
+            if _branch_accepts_field_value(branch, field_name, field_value)
+        ]
+        if matching:
+            return matching[0]
 
     return candidates[0]
+
+
+def _branch_accepts_field_value(branch: dict, field_name: str, field_value) -> bool:
+    """Совместимо ли значение с ограничениями ветки (const/enum / not.required)."""
+    if not isinstance(branch, dict):
+        return False
+    not_block = branch.get("not")
+    if isinstance(not_block, dict):
+        forbidden = not_block.get("required") or []
+        if field_name in forbidden:
+            return False
+
+    prop_schema = branch.get("properties", {}).get(field_name)
+    if not isinstance(prop_schema, dict):
+        return True
+    if "const" in prop_schema:
+        return prop_schema["const"] == field_value
+    if "enum" in prop_schema:
+        return field_value in prop_schema["enum"]
+    for keyword in ("oneOf", "anyOf"):
+        options = [
+            opt for opt in prop_schema.get(keyword, [])
+            if isinstance(opt, dict)
+        ]
+        if options and all("const" in opt for opt in options):
+            return field_value in [opt["const"] for opt in options]
+    return True
+
+
+def _select_composition_branch(
+    schema: dict,
+    field_name: str | None = None,
+    field_value=None,
+) -> dict | None:
+    """Ветка composition для сборки payload: по полю/значению или первая."""
+    if not _schema_has_composition(schema):
+        return None
+    if field_name:
+        branch = _find_oneof_branch_for_field(schema, field_name, field_value)
+        if branch is not None:
+            return branch
+    return next(_iter_schema_branches(schema), None)
+
+
+def _apply_branch_not_constraints(payload: dict, branch: dict | None) -> dict:
+    """Убирает поля, запрещённые веткой (not.required)."""
+    if not isinstance(payload, dict) or not isinstance(branch, dict):
+        return payload
+    not_block = branch.get("not")
+    if not isinstance(not_block, dict):
+        return payload
+    for name in not_block.get("required") or []:
+        payload.pop(name, None)
+    return payload
 
 
 def _schema_has_composition(schema: dict) -> bool:
@@ -689,6 +788,7 @@ def _minimal_object_composed(schema: dict, exclude: str | None = None) -> dict:
     """
     Минимальный валидный object: required из properties + одна ветка oneOf/anyOf/allOf.
     Поддерживает схемы вида {required: [acl_name], properties: {acl_name}, oneOf: [...]}.
+    Для discriminated oneOf пинит const discriminator из ветки, а не JSF-мусор.
     """
     if not isinstance(schema, dict) or _resolve_schema_type(schema) != 'object':
         return {}
@@ -696,13 +796,12 @@ def _minimal_object_composed(schema: dict, exclude: str | None = None) -> dict:
     props = schema.get('properties', {})
     result = {}
 
-    for req in schema.get('required', []):
-        if req == exclude:
-            continue
-        if req in props:
-            result[req] = _minimal_prop_value(props[req])
-
     if not _schema_has_composition(schema):
+        for req in schema.get('required', []):
+            if req == exclude:
+                continue
+            if req in props:
+                result[req] = _minimal_prop_value(props[req])
         return _coerce_payload_to_schema(result, schema)
 
     branch = None
@@ -711,9 +810,22 @@ def _minimal_object_composed(schema: dict, exclude: str | None = None) -> dict:
     if branch is None:
         branch = next(_iter_schema_branches(schema), None)
     if branch is None:
+        for req in schema.get('required', []):
+            if req == exclude:
+                continue
+            if req in props:
+                result[req] = _minimal_prop_value(props[req])
         return _coerce_payload_to_schema(result, schema)
 
     branch_props = branch.get('properties', {})
+    for req in schema.get('required', []):
+        if req == exclude:
+            continue
+        if req in branch_props:
+            result[req] = _minimal_prop_value(branch_props[req])
+        elif req in props:
+            result[req] = _minimal_prop_value(props[req])
+
     branch_only = len(branch_props) == 1 and not props
 
     if branch_only:
@@ -726,7 +838,15 @@ def _minimal_object_composed(schema: dict, exclude: str | None = None) -> dict:
         return _coerce_payload_to_schema(result, schema)
 
     branch_obj = _minimal_object_composed(branch, exclude=exclude if exclude not in props else None)
-    result.update(branch_obj)
+    for key, val in branch_obj.items():
+        branch_prop = branch_props.get(key, {})
+        if isinstance(branch_prop, dict) and (
+            'const' in branch_prop or 'enum' in branch_prop
+        ):
+            result[key] = val
+        else:
+            result.setdefault(key, val)
+    result = _apply_branch_not_constraints(result, branch)
     return _coerce_payload_to_schema(result, schema)
 
 
@@ -747,33 +867,47 @@ def _assign_object_value(prop_schema: dict, value):
 
 
 def _build_field_container(schema: dict, field: str, value) -> dict:
-    """Объект на уровне schema с field=value и обязательными соседями."""
+    """
+    Объект на уровне schema с field=value и обязательными соседями.
+    Для root oneOf выбирает совместимую ветку и пинит discriminator (const/enum),
+    чтобы JSF не подставлял мусор в key_type и т.п.
+    """
     props = schema.get('properties', {})
     result = {}
+    branch = _select_composition_branch(schema, field, value)
 
     for req in schema.get('required', []):
         if req == field:
             continue
-        if req in props:
+        if branch and req in branch.get('properties', {}):
+            result[req] = _minimal_prop_value(branch['properties'][req])
+        elif req in props:
             result[req] = _minimal_prop_value(props[req])
 
     if field in props:
         result[field] = _assign_object_value(props[field], value)
-        if _schema_has_composition(schema):
-            branch = next(_iter_schema_branches(schema), None)
-            if branch:
-                branch_obj = _minimal_object_composed(branch)
-                for key, val in branch_obj.items():
+        if branch:
+            branch_obj = _minimal_object_composed(branch)
+            for key, val in branch_obj.items():
+                if key == field:
+                    continue
+                branch_prop = branch.get('properties', {}).get(key, {})
+                # Discriminator / ограниченные поля ветки перекрывают JSF из required
+                if isinstance(branch_prop, dict) and (
+                    'const' in branch_prop or 'enum' in branch_prop
+                ):
+                    result[key] = val
+                else:
                     result.setdefault(key, val)
+            result = _apply_branch_not_constraints(result, branch)
         return _coerce_payload_to_schema(result, schema)
 
-    if _schema_has_composition(schema):
-        branch = _find_oneof_branch_for_field(schema, field, value)
-        if branch:
-            branch_obj = _minimal_object_composed(branch, exclude=field)
-            branch_obj[field] = value
-            result.update(branch_obj)
-            return _coerce_payload_to_schema(result, schema)
+    if branch:
+        branch_obj = _minimal_object_composed(branch, exclude=field)
+        branch_obj[field] = value
+        result.update(branch_obj)
+        result = _apply_branch_not_constraints(result, branch)
+        return _coerce_payload_to_schema(result, schema)
 
     result[field] = value
     return _coerce_payload_to_schema(result, schema)
@@ -842,17 +976,33 @@ def collect_test_values(field_schema: dict) -> list:
     """
     schema = copy.deepcopy(field_schema)
 
+    # const раньше composition: discriminator (key_type: const "rsa")
+    if 'const' in schema:
+        return _append_null_if_allowed(schema, [schema['const']])
+
     if _schema_has_composition(schema):
-        values = []
+        constrained: list = []
+        unconstrained: list = []
+        has_null = False
         for keyword in ('oneOf', 'anyOf'):
             for branch in schema.get(keyword, []):
                 if isinstance(branch, dict) and branch.get('type') == 'null':
-                    if None not in values:
-                        values.append(None)
+                    has_null = True
         for branch in _iter_schema_branches(schema):
+            bucket = (
+                constrained
+                if isinstance(branch, dict) and (
+                    'const' in branch or 'enum' in branch
+                )
+                else unconstrained
+            )
             for candidate in collect_test_values(branch):
-                if candidate not in values:
-                    values.append(candidate)
+                if candidate not in bucket:
+                    bucket.append(candidate)
+        # Рядом с const/enum discriminator'ами не тащим JSF со «голого» string
+        values = constrained if constrained else unconstrained
+        if has_null and None not in values:
+            values.append(None)
         if values:
             return _append_null_if_allowed(schema, values)
 
@@ -2140,11 +2290,7 @@ def _apply_auto_scalar_delete_lifecycle(
         )
         return
 
-    rules = (
-        endpoint_rules.get(target_endpoint)
-        or endpoint_rules.get(target_endpoint.rstrip("/"))
-        or {}
-    )
+    rules = _get_endpoint_rules(target_endpoint, endpoint_rules) or {}
     action_rules = rules.get(main_action, {})
     id_field = pattern["id_field"]
     add_inner_schema = pattern["add_inner_schema"]
@@ -2190,11 +2336,154 @@ def _apply_auto_scalar_delete_lifecycle(
         logger.debug(f"Auto-setup before scalar delete: {id_field}={delete_value}")
 
 
-def _get_endpoint_rules(target_endpoint: str, endpoint_rules: dict) -> dict | None:
-    rules = endpoint_rules.get(target_endpoint) or endpoint_rules.get(
-        target_endpoint.rstrip("/"),
+_ENDPOINT_RULES_META_KEYS = frozenset({
+    "bind_fields",
+    "teardown_priority",
+    "lifecycle_key_field",
+    "requirements",
+})
+
+
+def _normalize_endpoint_rules_path(path: str) -> str:
+    return _normalize_endpoint(path).rstrip("/") or "/"
+
+
+def _endpoint_under_rules_prefix(endpoint: str, prefix: str) -> bool:
+    """True, если endpoint — дочерний путь prefix (не сам prefix)."""
+    ep = _normalize_endpoint_rules_path(endpoint)
+    px = _normalize_endpoint_rules_path(prefix)
+    return ep != px and (ep == px or ep.startswith(f"{px}/"))
+
+
+def _lifecycle_step_fingerprint(step: dict) -> str:
+    return json.dumps(
+        {
+            "endpoint": step.get("endpoint"),
+            "method": step.get("method", "POST").upper(),
+            "payload": step.get("payload", {}),
+        },
+        sort_keys=True,
+        ensure_ascii=False,
     )
-    return rules if rules else None
+
+
+def _dedupe_lifecycle_steps(steps: list[dict]) -> list[dict]:
+    seen: set[str] = set()
+    result: list[dict] = []
+    for step in steps:
+        fp = _lifecycle_step_fingerprint(step)
+        if fp in seen:
+            continue
+        seen.add(fp)
+        result.append(step)
+    return result
+
+
+def _merge_lifecycle_phase_values(*values) -> list[dict] | None:
+    steps: list[dict] = []
+    for value in values:
+        steps.extend(_as_lifecycle_list(value))
+    if not steps:
+        return None
+    return _dedupe_lifecycle_steps(steps)
+
+
+def _store_merged_lifecycle_phase(merged: dict, phase: str, steps: list[dict] | None) -> None:
+    if not steps:
+        merged.pop(phase, None)
+        return
+    merged[phase] = steps[0] if len(steps) == 1 else steps
+
+
+def _merge_endpoint_action_blocks(base: dict, override: dict) -> dict:
+    result = copy.deepcopy(base)
+    for key, block in override.items():
+        if key in _ENDPOINT_RULES_META_KEYS or key in ("setup", "teardown"):
+            continue
+        if not isinstance(block, dict):
+            continue
+        if key not in result or not isinstance(result[key], dict):
+            result[key] = copy.deepcopy(block)
+            continue
+        merged_block = copy.deepcopy(result[key])
+        for phase in ("setup", "teardown"):
+            combined = _merge_lifecycle_phase_values(
+                merged_block.get(phase),
+                block.get(phase),
+            )
+            _store_merged_lifecycle_phase(merged_block, phase, combined)
+        result[key] = merged_block
+    return result
+
+
+def _merge_endpoint_rules(*rule_dicts: dict) -> dict | None:
+    """
+    Сливает правила endpoint_rules: parent (prefix) → child (exact).
+    setup/teardown конкатенируются и дедуплицируются; meta — child перекрывает parent.
+    """
+    merged: dict | None = None
+    for rules in rule_dicts:
+        if not isinstance(rules, dict) or not rules:
+            continue
+        if merged is None:
+            merged = copy.deepcopy(rules)
+            continue
+        bind_fields = list(dict.fromkeys(
+            list(merged.get("bind_fields", [])) + list(rules.get("bind_fields", [])),
+        ))
+        if bind_fields:
+            merged["bind_fields"] = bind_fields
+        else:
+            merged.pop("bind_fields", None)
+        for meta in ("teardown_priority", "lifecycle_key_field", "requirements"):
+            if rules.get(meta) is not None:
+                merged[meta] = rules[meta]
+        for phase in ("setup", "teardown"):
+            combined = _merge_lifecycle_phase_values(
+                merged.get(phase),
+                rules.get(phase),
+            )
+            _store_merged_lifecycle_phase(merged, phase, combined)
+        merged = _merge_endpoint_action_blocks(merged, rules)
+    return merged
+
+
+def _collect_endpoint_rules_prefixes(
+    target_endpoint: str,
+    endpoint_rules: dict,
+) -> list[str]:
+    """Родительские ключи endpoint_rules, чей путь — префикс target (короче → раньше)."""
+    target = _normalize_endpoint_rules_path(target_endpoint)
+    prefixes: list[str] = []
+    for key in endpoint_rules:
+        if not isinstance(key, str):
+            continue
+        norm_key = _normalize_endpoint_rules_path(key)
+        if _endpoint_under_rules_prefix(target, norm_key):
+            prefixes.append(norm_key)
+    prefixes.sort(key=lambda item: (len(item), item))
+    return prefixes
+
+
+def _get_endpoint_rules(target_endpoint: str, endpoint_rules: dict) -> dict | None:
+    """
+    Правила для эндпоинта: merge всех prefix-родителей + exact-ключ.
+    Пример: /telnet/port ← /telnet + /telnet/port (если есть).
+    """
+    if not endpoint_rules:
+        return None
+    target = _normalize_endpoint_rules_path(target_endpoint)
+    parts: list[dict] = []
+    for prefix in _collect_endpoint_rules_prefixes(target, endpoint_rules):
+        block = endpoint_rules.get(prefix) or endpoint_rules.get(f"{prefix}/")
+        if isinstance(block, dict):
+            parts.append(block)
+    exact = endpoint_rules.get(target) or endpoint_rules.get(f"{target}/")
+    if isinstance(exact, dict):
+        parts.append(exact)
+    if not parts:
+        return None
+    return _merge_endpoint_rules(*parts)
 
 
 def _endpoint_rules_top_level_lifecycle(rules: dict) -> dict:
@@ -2204,6 +2493,29 @@ def _endpoint_rules_top_level_lifecycle(rules: dict) -> dict:
         for phase in ("setup", "teardown")
         if phase in rules
     }
+
+
+def _should_skip_endpoint_rules_lifecycle_step(
+    phase: str,
+    step_endpoint: str,
+    target_endpoint: str,
+    main_action: str | None,
+) -> bool:
+    """
+    Не дублировать lifecycle на том же эндпоинте, что и main_test:
+    - setup /…/add при main add (или flat add без action);
+    - teardown /…/delete при main delete (или flat delete без action);
+    - action.delete на том же path — setup add оставляем (datetime/dst).
+    """
+    if step_endpoint.rstrip("/") != target_endpoint.rstrip("/"):
+        return False
+    if phase == "setup":
+        return main_action != "delete"
+    if phase == "teardown":
+        if main_action == "delete":
+            return True
+        return main_action is None and target_endpoint.rstrip("/").endswith("/delete")
+    return False
 
 
 def _endpoint_rules_action_lifecycle(rules: dict, action_key: str | None) -> dict | None:
@@ -2216,14 +2528,6 @@ def _endpoint_rules_action_lifecycle(rules: dict, action_key: str | None) -> dic
     if "setup" not in block and "teardown" not in block:
         return None
     return block
-
-
-_ENDPOINT_RULES_META_KEYS = frozenset({
-    "bind_fields",
-    "teardown_priority",
-    "lifecycle_key_field",
-    "requirements",
-})
 
 
 def _resolve_endpoint_rules_action_key(
@@ -2300,6 +2604,17 @@ def _apply_endpoint_rules_lifecycle(
         for phase in ("setup", "teardown"):
             for step_def in _as_lifecycle_list(lifecycle_source.get(phase)):
                 if not isinstance(step_def, dict) or "endpoint" not in step_def:
+                    continue
+                if _should_skip_endpoint_rules_lifecycle_step(
+                    phase,
+                    step_def["endpoint"],
+                    target_endpoint,
+                    main_action,
+                ):
+                    logger.debug(
+                        f"Self-skip endpoint {phase}: тестируем {target_endpoint}, "
+                        f"пропускаю {step_def['endpoint']}",
+                    )
                     continue
                 step = copy.deepcopy(step_def)
                 if "note" not in step:

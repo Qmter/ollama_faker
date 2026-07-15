@@ -28,7 +28,23 @@ class PreprocessSchemaTests(unittest.TestCase):
         }
         result = preprocess_schema_for_jsf(schema)
         self.assertEqual(result["enum"], ["add", "delete"])
+        self.assertEqual(result["type"], "string")
         self.assertNotIn("oneOf", result)
+
+    def test_oneof_integer_const_becomes_integer_enum(self):
+        """RSA/ECDSA modulus: oneOf[{const:1024},…] → enum + type:integer (не string)."""
+        schema = {
+            "oneOf": [
+                {"const": 1024},
+                {"const": 2048},
+                {"const": 4096},
+                {"const": 8192},
+            ],
+        }
+        result = preprocess_schema_for_jsf(schema)
+        self.assertEqual(result["enum"], [1024, 2048, 4096, 8192])
+        self.assertEqual(result["type"], "integer")
+        self.assertTrue(_is_valid_for_schema(1024, result))
 
     def test_nullable_oneof_unwraps_inner_schema(self):
         schema = {

@@ -90,6 +90,78 @@ class CoverageGenerationTests(unittest.TestCase):
         self.assertIn("ifname", fields)
         self.assertIn("mtu", fields)
 
+    def test_discriminated_oneof_covers_modulus_with_matching_key_type(self):
+        """Корневой oneOf по key_type: modulus/key_name не должны теряться из‑за JSF."""
+        from main import preprocess_schema_for_jsf, _build_payload_for_path
+
+        schema = preprocess_schema_for_jsf({
+            "required": ["key_type"],
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "key_type": {"type": "string"},
+                "modulus": {"type": "integer"},
+                "key_name": {"type": "string", "pattern": "^[A-Za-z0-9_-]+$"},
+            },
+            "oneOf": [
+                {
+                    "properties": {
+                        "key_type": {"const": "rsa"},
+                        "modulus": {"enum": [1024, 2048, 4096]},
+                    },
+                },
+                {
+                    "properties": {
+                        "key_type": {"const": "dsa"},
+                        "modulus": {"const": 1024},
+                    },
+                },
+                {
+                    "properties": {
+                        "key_type": {"const": "ecdsa"},
+                        "modulus": {"enum": [256, 384, 521]},
+                    },
+                },
+                {
+                    "not": {"required": ["modulus"]},
+                    "properties": {
+                        "key_type": {"const": "ed25519"},
+                    },
+                },
+            ],
+        })
+
+        rsa_mod = _build_payload_for_path(schema, "modulus", 2048)
+        self.assertEqual(rsa_mod["key_type"], "rsa")
+        self.assertEqual(rsa_mod["modulus"], 2048)
+
+        ecdsa_mod = _build_payload_for_path(schema, "modulus", 256)
+        self.assertEqual(ecdsa_mod["key_type"], "ecdsa")
+        self.assertEqual(ecdsa_mod["modulus"], 256)
+
+        named = _build_payload_for_path(schema, "key_name", "autotest-key")
+        self.assertIn(named["key_type"], {"rsa", "dsa", "ecdsa", "ed25519"})
+        self.assertEqual(named["key_name"], "autotest-key")
+        if named["key_type"] == "ed25519":
+            self.assertNotIn("modulus", named)
+
+        records = generate_value_coverage_payloads(schema)
+        keys = {k for r in records for k in r.coverage_keys}
+        self.assertIn('key_type="rsa"', keys)
+        self.assertIn('key_type="ed25519"', keys)
+        self.assertIn("modulus=2048", keys)
+        self.assertIn("modulus=256", keys)
+        self.assertTrue(any(k.startswith("key_name=") for k in keys))
+        self.assertNotIn("modulus=1", keys)
+
+        by_mod = {
+            r.payload.get("modulus"): r.payload.get("key_type")
+            for r in records
+            if "modulus" in r.payload
+        }
+        self.assertEqual(by_mod.get(2048), "rsa")
+        self.assertEqual(by_mod.get(256), "ecdsa")
+
 
 class DedupeTests(unittest.TestCase):
     def test_dedupe_identical_payloads(self):

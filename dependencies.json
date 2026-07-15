@@ -165,7 +165,7 @@
         "payload": {
           "action": {
             "delete": {
-              "acl_name": "{{created_acl_name}}"
+              "acl_name": "{{access_list}}"
             }
           }
         },
@@ -208,6 +208,90 @@
     }
   },
   "endpoint_rules": {
+    "/ssh/client": {
+      "bind_fields": ["key_name"],
+      "setup": {
+        "endpoint": "/ssh/client/key",
+        "method": "POST",
+        "payload": {
+          "key_type": "rsa",
+          "modulus": 1024,
+          "key_name": "{{key_name}}"
+        }
+      },
+      "teardown": {
+        "endpoint": "/ssh/client/key/delete",
+        "method": "POST",
+        "payload": {
+          "key_name": "{{key_name}}"
+        }
+      }
+    },
+    "/telnet": {
+      "bind_fields": ["vrf_name"],
+      "setup": {
+        "endpoint": "/telnet/add",
+        "method": "POST",
+        "payload": {
+          "vrf_name": "{{vrf_name}}"
+        },
+        "note": "Telnet instance before config endpoints (/telnet/*)"
+      },
+      "teardown": {
+        "endpoint": "/telnet/delete",
+        "method": "POST",
+        "payload": {
+          "vrf_name": "{{vrf_name}}"
+        }
+      }
+    },
+    "/datetime/dst": {
+      "bind_fields": ["time", "date", "timezone"],
+      "add": {
+        "teardown": {
+          "endpoint": "/datetime/dst",
+          "method": "POST",
+          "payload": {
+            "action": {
+              "delete": {
+                "time": "{{time}}",
+                "date": "{{date}}"
+              }
+            }
+          },
+          "note": "Cleanup DST after add test"
+        }
+      },
+      "delete": {
+        "setup": {
+          "endpoint": "/datetime/dst",
+          "method": "POST",
+          "payload": {
+            "action": {
+              "add": {
+                "time": "{{time}}",
+                "timezone": "{{timezone}}",
+                "date": "{{date}}"
+              }
+            }
+          },
+          "note": "Create DST before delete test"
+        },
+        "teardown": {
+          "endpoint": "/datetime/dst",
+          "method": "POST",
+          "payload": {
+            "action": {
+              "delete": {
+                "time": "{{time}}",
+                "date": "{{date}}"
+              }
+            }
+          },
+          "note": "Cleanup DST after delete test"
+        }
+      }
+    },
     "dns/server/serial": {
       "teardown": {
         "endpoint": "/dns/server/serial",
@@ -886,6 +970,7 @@
     "exclude_fields": ["jail_name"]
   },
   "synthetic_bind_fields": {
+    "/datetime/dst": ["time", "timezone", "date"],
     "/acl/filter/filter_ipv4": ["acl_name"]
   },
   "mock_data": {
@@ -896,6 +981,10 @@
       "IPV6_ADDR_WITH_BIT_MASK": ["2001:db8:1::1/64", "2001:db8:2::1/64"]
     },
     "by_field": {
+      "key_name": ["key1", "key2"],
+      "date": ["23.12.2025"],
+      "time": ["12:00"],
+      "timezone": ["Europe/Moscow"],
       "description": ["", "autotest-desc"],
       "zone_name": ["zone1", "zone2"],
       "master_ip": ["10.0.0.1", "10.0.0.2"],
@@ -906,7 +995,8 @@
       "jail_name": ["jail1", "jail2"],
       "vrf_name": ["vrf1", "vrf2"],
       "vrf": ["vrf1", "vrf2"],
-      "acl_name": ["acl1", "acl2"]
+      "acl_name": ["acl1", "acl2"],
+      "access_list": ["acl1", "acl2"]
     }
   }
 }
