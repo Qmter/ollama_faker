@@ -537,6 +537,131 @@ class BuildTestScenariosTests(unittest.TestCase):
             finally:
                 os.chdir(prev)
 
+    def test_eth_vlan_add_self_skip_omits_post_create_setup(self):
+        """Тест eth_vlan/add: ip/shutdown из lifecycle не в setup (интерфейса ещё нет)."""
+        ollama = OllamaOrchestrator.from_cli(False)
+        deps_path = Path(__file__).resolve().parent.parent / "dependencies.json"
+        with open(deps_path, encoding="utf-8") as f:
+            deps = json.load(f)
+        records = [
+            PayloadCoverage(
+                {"ifname": "eth1.2", "vid": 2},
+                ['__minimal__', 'ifname="eth1.2"'],
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            prev = os.getcwd()
+            os.chdir(td)
+            try:
+                build_test_scenarios(
+                    "/interfaces/eth_vlan/add",
+                    "post",
+                    records,
+                    deps,
+                    ollama=ollama,
+                )
+                scenario = json.loads(
+                    Path(
+                        "tests/interfaces/interfaces_eth_vlan_add_post.json",
+                    ).read_text(encoding="utf-8"),
+                )[0]
+                setup_eps = [s["endpoint"] for s in scenario["setup"]]
+                self.assertNotIn("/interfaces/eth_vlan/add", setup_eps)
+                self.assertNotIn("/interfaces/common/ip_address", setup_eps)
+                self.assertNotIn("/interfaces/shutdown", setup_eps)
+            finally:
+                os.chdir(prev)
+
+    def test_eth_vlan_bind_fields_fills_ip_addr_from_mock(self):
+        """interface_rules.bind_fields + mock_data.by_field → {{ip_addr}} подставляется."""
+        ollama = OllamaOrchestrator.from_cli(False)
+        deps = {
+            "field_mappings": {},
+            "interface_rules": {
+                "ifname": {
+                    "rules": [
+                        {
+                            "prefix": "bond",
+                            "create": "/interfaces/bonding/add",
+                            "delete": "/interfaces/bonding/delete",
+                        },
+                        {
+                            "pattern": (
+                                r"^eth(0|[1-9][0-9]{0,3})"
+                                r"([\\.](0|[1-9][0-9]{0,3}))$"
+                            ),
+                            "bind_fields": ["ifname", "ip_addr"],
+                            "setup": [
+                                {
+                                    "endpoint": "/interfaces/eth_vlan/add",
+                                    "method": "POST",
+                                    "payload": {
+                                        "ifname": "{{ifname}}",
+                                        "vid": "{{vid}}",
+                                    },
+                                },
+                                {
+                                    "endpoint": "/interfaces/common/ip_address",
+                                    "method": "POST",
+                                    "payload": {
+                                        "ifname": "{{ifname}}",
+                                        "ip_addr": "{{ip_addr}}",
+                                    },
+                                },
+                            ],
+                            "teardown": [
+                                {
+                                    "endpoint": "/interfaces/eth_vlan/delete",
+                                    "method": "POST",
+                                    "payload": {"ifname": "{{ifname}}"},
+                                },
+                            ],
+                        },
+                    ],
+                },
+            },
+            "endpoint_rules": {},
+            "mock_data": {
+                "by_field": {
+                    "ip_addr": ["10.0.0.10/24"],
+                },
+            },
+        }
+        records = [
+            PayloadCoverage(
+                {
+                    "ifname": "bond0",
+                    "capability": {"enslave": ["eth1.2"]},
+                },
+                ['capability.enslave=["eth1.2"]'],
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            prev = os.getcwd()
+            os.chdir(td)
+            try:
+                build_test_scenarios(
+                    "/interfaces/bonding/capability",
+                    "post",
+                    records,
+                    deps,
+                    ollama=ollama,
+                )
+                scenario = json.loads(
+                    Path(
+                        "tests/interfaces/interfaces_bonding_capability_post.json",
+                    ).read_text(encoding="utf-8"),
+                )[0]
+                ip_step = next(
+                    s for s in scenario["setup"]
+                    if s["endpoint"] == "/interfaces/common/ip_address"
+                )
+                self.assertEqual(ip_step["payload"]["ifname"], "eth1.2")
+                self.assertEqual(ip_step["payload"]["ip_addr"], "10.0.0.10/24")
+                self.assertNotIn("{{", str(ip_step["payload"]["ip_addr"]))
+            finally:
+                os.chdir(prev)
+
 
 if __name__ == "__main__":
     unittest.main()

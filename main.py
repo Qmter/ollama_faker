@@ -1246,7 +1246,12 @@ def _merge_coverage_records(records: dict[str, PayloadCoverage], record: Payload
             existing.coverage_keys.append(key)
 
 
-def generate_value_coverage_payloads(schema: dict, *, compact: bool = False) -> list[PayloadCoverage]:
+def generate_value_coverage_payloads(
+    schema: dict,
+    *,
+    compact: bool = False,
+    reserved: dict | None = None,
+) -> list[PayloadCoverage]:
     """
     Генерирует пейлоады для покрытия enum/boolean/границ.
     Для action oneOf — покрытие по веткам rule type без дубля add/delete.
@@ -1261,11 +1266,14 @@ def generate_value_coverage_payloads(schema: dict, *, compact: bool = False) -> 
         },
         field_schemas,
     )
+    path_values = _filter_path_values_reserved(path_values, reserved)
     all_paths = set(path_values)
 
     slices = _discover_coverage_slices(schema)
     if not slices:
-        return _generate_flat_coverage(schema, path_values, field_schemas, compact)
+        return _generate_flat_coverage(
+            schema, path_values, field_schemas, compact, reserved=reserved,
+        )
 
     logger.info(
         f"Покрытие по веткам: {len(slices)} slice(s)"
@@ -1280,6 +1288,7 @@ def generate_value_coverage_payloads(schema: dict, *, compact: bool = False) -> 
         slice_payloads = _generate_slice_coverage(
             schema, slc, path_values, field_schemas,
             seen_payloads, covered_targets, compact,
+            reserved=reserved,
         )
         payloads.extend(slice_payloads)
         logger.debug(f"Slice {slc.label}: +{len(slice_payloads)} пейлоадов")
@@ -1597,6 +1606,7 @@ def _generate_slice_coverage(
     seen_payloads: set,
     covered_targets: set,
     compact: bool,
+    reserved: dict | None = None,
 ) -> list[PayloadCoverage]:
     payloads: list[PayloadCoverage] = []
     records: dict[str, PayloadCoverage] = {}
@@ -1609,6 +1619,9 @@ def _generate_slice_coverage(
         value=None,
         mirror=True,
     ):
+        payload = scrub_reserved_payload(
+            payload, reserved, path_values=path_values,
+        )
         payload = _coerce_payload_to_schema(payload, schema)
         keys = list(coverage_keys or [])
         if path is not None:
@@ -1662,10 +1675,16 @@ def _generate_slice_coverage(
 
 
 def _generate_flat_coverage(
-    schema: dict, path_values: dict, field_schemas: dict, compact: bool,
+    schema: dict,
+    path_values: dict,
+    field_schemas: dict,
+    compact: bool,
+    reserved: dict | None = None,
 ) -> list[PayloadCoverage]:
     """Legacy: одно flat-покрытие для простых схем без action oneOf."""
-    minimal_base = build_minimal_payload(schema)
+    minimal_base = scrub_reserved_payload(
+        build_minimal_payload(schema), reserved, path_values=path_values,
+    )
     records: dict[str, PayloadCoverage] = {}
     seen: set = set()
     covered_targets: set = set()
@@ -1679,6 +1698,9 @@ def _generate_flat_coverage(
         value=None,
     ):
         nonlocal skipped
+        payload = scrub_reserved_payload(
+            payload, reserved, path_values=path_values,
+        )
         payload = _coerce_payload_to_schema(payload, schema)
         keys = list(coverage_keys or [])
         if path is not None:
@@ -2108,12 +2130,16 @@ def _apply_field_lifecycle(
     env_file: dict | None = None,
     vid_pool: _VidPool | None = None,
     endpoint_rules: dict | None = None,
+    mock_by_field: dict[str, list] | None = None,
 ):
     """Setup/teardown для одного field_mapping с учётом phases."""
     if config.get("optional") and value in (None, "", []):
         return
 
     lifecycle = _resolve_field_lifecycle(config, field)
+    # bind_fields часто на верхнем уровне field_mappings, а не в setup/teardown
+    if isinstance(lifecycle, dict) and config.get("bind_fields") and not lifecycle.get("bind_fields"):
+        lifecycle = {**lifecycle, "bind_fields": config["bind_fields"]}
     var_name = f"created_{field}"
 
     if "setup" in phases:
@@ -2125,6 +2151,7 @@ def _apply_field_lifecycle(
             env_file=env_file,
             vid_pool=vid_pool,
             endpoint_rules=endpoint_rules,
+            mock_by_field=mock_by_field,
         )
     else:
         variables.setdefault(var_name, value)
@@ -2136,6 +2163,7 @@ def _apply_field_lifecycle(
             teardown_priority=teardown_priority,
             env_file=env_file,
             vid_pool=vid_pool,
+            mock_by_field=mock_by_field,
         )
 
 
@@ -2724,19 +2752,26 @@ _VLAN_IFNAME_RE = re.compile(r"^vlan(\d+)$")
 class _VidPool:
     """Пул VID из VID_RANGE (.env / os.environ) для интерфейсов без vid в имени."""
 
-    def __init__(self, env_file: dict | None = None):
-        self._values = _parse_vid_pool(env_file or {})
+    def __init__(
+        self,
+        env_file: dict | None = None,
+        reserved: dict | None = None,
+    ):
+        self._values = _parse_vid_pool(env_file or {}, reserved=reserved)
         self._index = 0
 
     def allocate(self) -> int:
         if not self._values:
-            return 1
+            return 2
         value = self._values[self._index % len(self._values)]
         self._index += 1
         return value
 
 
-def _parse_vid_pool(env_file: dict) -> list[int]:
+def _parse_vid_pool(
+    env_file: dict,
+    reserved: dict | None = None,
+) -> list[int]:
     raw = os.environ.get("VID_RANGE") or env_file.get("VID_RANGE") or ""
     if not raw:
         return []
@@ -2751,7 +2786,12 @@ def _parse_vid_pool(env_file: dict) -> list[int]:
             values.extend(range(start, end + 1))
         else:
             values.append(int(part))
-    return list(dict.fromkeys(v for v in values if 1 <= v <= 4094))
+    reserved_vids = _reserved_field_keys(reserved, "vid") if reserved else frozenset()
+    return list(dict.fromkeys(
+        v for v in values
+        if 1 <= v <= 4094
+        and (not reserved_vids or _reserved_cmp_key(v) not in reserved_vids)
+    ))
 
 
 def _infer_vid_from_ifname(ifname: str) -> int | None:
@@ -2782,11 +2822,17 @@ def _should_sync_vid_at_node(obj: dict, schema: dict | None) -> bool:
     return _schema_declares_property(schema, "vid")
 
 
-def _synchronize_vid_ifname_inplace(obj, schema: dict | None = None) -> None:
+def _synchronize_vid_ifname_inplace(
+    obj,
+    schema: dict | None = None,
+    *,
+    reserved: dict | None = None,
+) -> None:
     """
     Согласует vid с ifname в дереве payload.
     vlan4092 ↔ vid 4092, eth1.200 ↔ vid 200 — иначе vlandb teardown не совпадает с main_test.
     vid добавляется/меняется только на узлах, где vid уже есть или объявлен в схеме.
+    Reserved vid/ifname не синхронизируются (остаётся исходный payload).
     """
     if isinstance(obj, dict):
         ifname = obj.get("ifname")
@@ -2795,18 +2841,27 @@ def _synchronize_vid_ifname_inplace(obj, schema: dict | None = None) -> None:
             and _should_sync_vid_at_node(obj, schema)
             and (inferred := _infer_vid_from_ifname(ifname)) is not None
         ):
-            if obj.get("vid") != inferred:
-                logger.debug(
-                    "sync vid: %s → %s (ifname=%s)",
-                    obj.get("vid"),
-                    inferred,
+            if is_reserved_field_value("ifname", ifname, reserved) or is_reserved_field_value(
+                "vid", inferred, reserved,
+            ):
+                logger.warning(
+                    "sync vid пропущен: ifname=%s vid=%s в reserved_values",
                     ifname,
+                    inferred,
                 )
-            obj["vid"] = inferred
+            else:
+                if obj.get("vid") != inferred:
+                    logger.debug(
+                        "sync vid: %s → %s (ifname=%s)",
+                        obj.get("vid"),
+                        inferred,
+                        ifname,
+                    )
+                obj["vid"] = inferred
         props = schema.get("properties", {}) if isinstance(schema, dict) else {}
         for key, value in obj.items():
             child_schema = props.get(key) if isinstance(props.get(key), dict) else None
-            _synchronize_vid_ifname_inplace(value, child_schema)
+            _synchronize_vid_ifname_inplace(value, child_schema, reserved=reserved)
     elif isinstance(obj, list):
         item_schema = None
         if isinstance(schema, dict) and _resolve_schema_type(schema) == "array":
@@ -2814,13 +2869,296 @@ def _synchronize_vid_ifname_inplace(obj, schema: dict | None = None) -> None:
             if isinstance(items, dict):
                 item_schema = items
         for item in obj:
-            _synchronize_vid_ifname_inplace(item, item_schema)
+            _synchronize_vid_ifname_inplace(item, item_schema, reserved=reserved)
 
 
-def synchronize_vid_ifname(payload: dict, schema: dict | None = None) -> dict:
+def synchronize_vid_ifname(
+    payload: dict,
+    schema: dict | None = None,
+    *,
+    reserved: dict | None = None,
+) -> dict:
     """Копия payload с согласованными vid/ifname (только где vid уместен по схеме)."""
     result = copy.deepcopy(payload)
-    _synchronize_vid_ifname_inplace(result, schema)
+    _synchronize_vid_ifname_inplace(result, schema, reserved=reserved)
+    return result
+
+
+# =============================================================================
+# RESERVED VALUES (dependencies.json → reserved_values, опционально .env)
+# =============================================================================
+_INTERFACE_NAME_FIELDS = frozenset({
+    "ifname",
+    "primary_interface",
+    "port",
+    "interface",
+})
+
+
+def _reserved_cmp_key(value):
+    """Ключ сравнения: '1' и 1 считаются одним значением."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return ("b", value)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if isinstance(value, float) and not value.is_integer():
+            return ("f", value)
+        return ("n", int(value))
+    if isinstance(value, str):
+        text = value.strip()
+        if re.fullmatch(r"-?\d+", text):
+            return ("n", int(text))
+        return ("s", text)
+    return ("x", repr(value))
+
+
+def _coerce_reserved_tokens(values) -> frozenset:
+    keys: set = set()
+    if values is None:
+        return frozenset()
+    if isinstance(values, str):
+        values = [part.strip() for part in values.split(",") if part.strip()]
+    elif isinstance(values, (int, float, bool)):
+        values = [values]
+    if not isinstance(values, (list, tuple, set, frozenset)):
+        return frozenset()
+    for item in values:
+        if isinstance(item, str) and "," in item:
+            for part in (p.strip() for p in item.split(",") if p.strip()):
+                key = _reserved_cmp_key(part)
+                if key is not None:
+                    keys.add(key)
+            continue
+        key = _reserved_cmp_key(item)
+        if key is not None:
+            keys.add(key)
+    return frozenset(keys)
+
+
+def parse_reserved_values(
+    dependencies: dict | None = None,
+    env_file: dict | None = None,
+) -> dict | None:
+    """
+    Запрещённые значения для генерации тестов.
+
+    dependencies.json:
+      "reserved_values": {
+        "by_field": {
+          "ifname": ["vlan1", "vlan603", "switchport1"],
+          "vid": [0, 1, 603, 4095],
+          "vlan": ["0", "1", "603", "4095"]
+        }
+      }
+
+    Опционально .env (дополняет конфиг):
+      RESERVED_IFNAMES=vlan1,vlan603,switchport1
+      RESERVED_VIDS=0,1,603,4095
+    """
+    env_file = env_file or {}
+    by_field: dict[str, set] = {}
+
+    raw = (dependencies or {}).get("reserved_values")
+    if isinstance(raw, dict):
+        raw_by_field = raw.get("by_field")
+        if isinstance(raw_by_field, dict):
+            for field_name, values in raw_by_field.items():
+                if not isinstance(field_name, str) or not field_name.strip():
+                    continue
+                tokens = _coerce_reserved_tokens(values)
+                if tokens:
+                    by_field.setdefault(field_name.strip(), set()).update(tokens)
+
+    ifnames_raw = os.environ.get("RESERVED_IFNAMES") or env_file.get("RESERVED_IFNAMES")
+    if ifnames_raw:
+        by_field.setdefault("ifname", set()).update(_coerce_reserved_tokens(ifnames_raw))
+
+    vids_raw = os.environ.get("RESERVED_VIDS") or env_file.get("RESERVED_VIDS")
+    if vids_raw:
+        tokens = _coerce_reserved_tokens(vids_raw)
+        by_field.setdefault("vid", set()).update(tokens)
+        by_field.setdefault("vlan", set()).update(tokens)
+
+    if not by_field:
+        return None
+
+    return {
+        "by_field": {
+            name: frozenset(keys) for name, keys in by_field.items() if keys
+        },
+    }
+
+
+def _reserved_field_keys(reserved: dict | None, field_name: str) -> frozenset:
+    if not reserved:
+        return frozenset()
+    return reserved.get("by_field", {}).get(field_name, frozenset())
+
+
+def is_reserved_field_value(
+    field_name: str,
+    value,
+    reserved: dict | None,
+) -> bool:
+    """True, если value запрещено для field_name (или для интерфейса через vid)."""
+    if not reserved or value is None or not field_name:
+        return False
+
+    keys = _reserved_field_keys(reserved, field_name)
+    cmp = _reserved_cmp_key(value)
+    if keys and cmp in keys:
+        return True
+
+    # Интерфейсные имена: vlan603 запрещён и через ifname, и через reserved vid=603
+    if isinstance(value, str) and field_name in _INTERFACE_NAME_FIELDS:
+        ifname_keys = _reserved_field_keys(reserved, "ifname")
+        if ifname_keys and _reserved_cmp_key(value) in ifname_keys:
+            return True
+        inferred = _infer_vid_from_ifname(value)
+        if inferred is not None:
+            vid_keys = _reserved_field_keys(reserved, "vid")
+            if vid_keys and _reserved_cmp_key(inferred) in vid_keys:
+                return True
+    return False
+
+
+def filter_reserved_values(
+    values: list,
+    field_name: str,
+    reserved: dict | None,
+) -> list:
+    """Убирает reserved-значения из списка (сохраняет порядок)."""
+    if not reserved or not values:
+        return values
+    return [
+        value for value in values
+        if not is_reserved_field_value(field_name, value, reserved)
+    ]
+
+
+def _path_leaf_field(path: str) -> str:
+    if not path:
+        return ""
+    return path.rsplit(".", 1)[-1]
+
+
+def apply_reserved_values_to_schema(
+    schema: dict,
+    reserved: dict | None,
+) -> dict:
+    """Фильтрует enum в схеме по имени свойства (reserved_values.by_field)."""
+    if not reserved or not isinstance(schema, dict):
+        return schema
+
+    schema = copy.deepcopy(schema)
+
+    def _walk(obj: dict) -> None:
+        if not isinstance(obj, dict):
+            return
+        for prop_name, prop_schema in obj.get("properties", {}).items():
+            if not isinstance(prop_schema, dict):
+                continue
+            enum = prop_schema.get("enum")
+            if isinstance(enum, list) and enum:
+                filtered = filter_reserved_values(enum, prop_name, reserved)
+                if filtered:
+                    prop_schema["enum"] = filtered
+                elif enum:
+                    logger.warning(
+                        "reserved_values: после фильтра enum %s пуст "
+                        "(было %s) — оставляю исходный",
+                        prop_name,
+                        enum,
+                    )
+            _walk(prop_schema)
+        for keyword in ("patternProperties",):
+            for item in obj.get(keyword, {}).values():
+                if isinstance(item, dict):
+                    _walk(item)
+        if isinstance(obj.get("items"), dict):
+            _walk(obj["items"])
+        for branch in _iter_schema_branches(obj):
+            if branch is not obj:
+                _walk(branch)
+
+    _walk(schema)
+    return schema
+
+
+def _filter_path_values_reserved(
+    path_values: dict[str, list],
+    reserved: dict | None,
+) -> dict[str, list]:
+    if not reserved:
+        return path_values
+    filtered: dict[str, list] = {}
+    for path, values in path_values.items():
+        leaf = _path_leaf_field(path)
+        kept = filter_reserved_values(values, leaf, reserved)
+        if kept:
+            filtered[path] = kept
+        elif values:
+            logger.debug(
+                "reserved_values: путь %s — все значения отфильтрованы, пропуск",
+                path,
+            )
+    return filtered
+
+
+def _fallback_for_reserved_field(
+    field_name: str,
+    reserved: dict | None,
+    path_values: dict[str, list] | None = None,
+):
+    """Подставляет безопасное значение вместо reserved (из path_values или дефолтов)."""
+    if path_values:
+        for path, values in path_values.items():
+            if _path_leaf_field(path) == field_name:
+                for candidate in values:
+                    if not is_reserved_field_value(field_name, candidate, reserved):
+                        return candidate
+    if field_name in ("vid", "vlan"):
+        for candidate in (100, 200, 2, 10, 400):
+            if not is_reserved_field_value("vid", candidate, reserved):
+                return candidate if field_name == "vid" else str(candidate)
+    return None
+
+
+def scrub_reserved_payload(
+    payload: dict,
+    reserved: dict | None,
+    *,
+    path_values: dict[str, list] | None = None,
+) -> dict:
+    """Заменяет reserved-значения в payload на безопасные (для __minimal__ и JSF)."""
+    if not reserved or not isinstance(payload, dict):
+        return payload
+
+    result = copy.deepcopy(payload)
+
+    def _walk(obj):
+        if isinstance(obj, dict):
+            for key, value in list(obj.items()):
+                if is_reserved_field_value(key, value, reserved):
+                    replacement = _fallback_for_reserved_field(
+                        key, reserved, path_values,
+                    )
+                    if replacement is not None:
+                        logger.debug(
+                            "reserved_values scrub: %s=%r → %r",
+                            key,
+                            value,
+                            replacement,
+                        )
+                        obj[key] = replacement
+                else:
+                    _walk(value)
+        elif isinstance(obj, list):
+            for item in obj:
+                _walk(item)
+
+    _walk(result)
     return result
 
 
@@ -2835,7 +3173,7 @@ def _resolve_vid(
     if vid_pool is not None:
         return vid_pool.allocate()
     pool = _parse_vid_pool(env_file or {})
-    return pool[0] if pool else 1
+    return pool[0] if pool else 2
 
 
 def _enrich_interface_variables(
@@ -3096,6 +3434,33 @@ def _normalize_lifecycle_requirements(value) -> frozenset[str]:
     )
 
 
+def _enrich_lifecycle_bind_fields(
+    vars_: dict,
+    variables: dict,
+    lifecycle: dict | None,
+    mock_by_field: dict[str, list] | None,
+) -> dict:
+    """
+    Подставляет bind_fields правила (interface_rules / field_mappings)
+    из mock_data.by_field, если значения нет в payload/variables.
+    Нужно для {{ip_addr}} и т.п. в setup интерфейсов.
+    """
+    if not lifecycle or not mock_by_field:
+        return vars_
+    bind_fields = lifecycle.get("bind_fields") or []
+    if not isinstance(bind_fields, list) or not bind_fields:
+        return vars_
+    names = [name for name in bind_fields if isinstance(name, str) and name.strip()]
+    if not names:
+        return vars_
+    filled = _fill_bind_fields_from_mock_data(dict(vars_), names, mock_by_field)
+    for key, value in filled.items():
+        vars_[key] = value
+        if key not in variables or variables.get(key) in (None, "", "{{" + key + "}}"):
+            variables[key] = value
+    return vars_
+
+
 def _append_lifecycle_setup(scenario, target_endpoint, field_name, field_value,
                             lifecycle, variables, var_name, main_action=None,
                             *, lifecycle_requirements: frozenset[str] | None = None,
@@ -3104,7 +3469,8 @@ def _append_lifecycle_setup(scenario, target_endpoint, field_name, field_value,
                             field_config: dict | None = None,
                             env_file: dict | None = None,
                             vid_pool: _VidPool | None = None,
-                            endpoint_rules: dict | None = None):
+                            endpoint_rules: dict | None = None,
+                            mock_by_field: dict[str, list] | None = None):
     """Setup: один или несколько шагов (setup / create)."""
     steps = list(_iter_setup_steps(lifecycle, field_name, field_value))
     if not steps:
@@ -3117,12 +3483,24 @@ def _append_lifecycle_setup(scenario, target_endpoint, field_name, field_value,
     )
     if template_ifname is not None:
         vars_["ifname"] = template_ifname
+    vars_ = _enrich_lifecycle_bind_fields(
+        vars_, variables, lifecycle, mock_by_field,
+    )
     force_setup = bool(
         lifecycle_requirements and "setup" in lifecycle_requirements
     )
     needs_vlandb = any(_payload_template_uses_vid(step.get("payload", {})) for step in steps)
+    setup_chain_aborted = False
 
     for step_def in steps:
+        if setup_chain_aborted:
+            logger.debug(
+                "Self-skip setup chain: пропуск %s (create для %s уже в main_test)",
+                step_def.get("endpoint"),
+                target_endpoint,
+            )
+            continue
+
         endpoint = step_def["endpoint"]
         is_self = endpoint.rstrip("/") == target_endpoint.rstrip("/")
         if is_self and main_action != "delete" and not force_setup:
@@ -3130,6 +3508,9 @@ def _append_lifecycle_setup(scenario, target_endpoint, field_name, field_value,
                 f"Self-skip setup: тестируем {target_endpoint}, "
                 f"пропускаю {endpoint}"
             )
+            # Шаги после create (ip, shutdown, …) требуют существующий интерфейс —
+            # при self-test create выполняется в main_test, их в setup не ставим.
+            setup_chain_aborted = True
             continue
 
         step = copy.deepcopy(step_def) # Копируем шаг
@@ -3189,6 +3570,7 @@ def _append_lifecycle_teardown(
     template_ifname: str | None = None,
     env_file: dict | None = None,
     vid_pool: _VidPool | None = None,
+    mock_by_field: dict[str, list] | None = None,
 ):
     """Teardown: один или несколько шагов (teardown / delete)."""
     steps = list(_iter_teardown_steps(lifecycle, field_name, field_value))
@@ -3205,6 +3587,9 @@ def _append_lifecycle_teardown(
     )
     if template_ifname is not None:
         vars_["ifname"] = template_ifname
+    vars_ = _enrich_lifecycle_bind_fields(
+        vars_, variables, lifecycle, mock_by_field,
+    )
 
     for step_def in steps: # Для каждого шага
         endpoint = step_def["endpoint"] # Получаем endpoint
@@ -3313,6 +3698,8 @@ def _resolve_interface_lifecycle_by_value(field_value: str, field_rules: dict):
             result["requirements"] = _normalize_lifecycle_requirements(reqs)
         if (priority := rule.get("teardown_priority")) is not None:
             result["teardown_priority"] = int(priority)
+        if bind_fields := rule.get("bind_fields"):
+            result["bind_fields"] = list(bind_fields)
         if result:
             return result
 
@@ -3642,7 +4029,11 @@ def _collect_interface_schema_patterns(iface_rules: dict) -> frozenset[str]:
     return frozenset(patterns)
 
 
-def build_interface_inventory(dependencies: dict, env_file: dict | None = None) -> list:
+def build_interface_inventory(
+    dependencies: dict,
+    env_file: dict | None = None,
+    reserved: dict | None = None,
+) -> list:
     """
     Собирает инвентарь из interface_rules (pattern или prefix + env/allowed).
     Источники имён (по приоритету): os.environ > .env > поле "allowed".
@@ -3657,6 +4048,20 @@ def build_interface_inventory(dependencies: dict, env_file: dict | None = None) 
             names = _resolve_allowed_names(rule, env_file) # Получаем список имён из правила
             if not names: # Если список имён пустой, пропускаем
                 continue
+
+            if reserved:
+                filtered = [
+                    name for name in names
+                    if not is_reserved_field_value("ifname", name, reserved)
+                ]
+                if not filtered and names:
+                    logger.warning(
+                        "reserved_values: все имена правила отфильтрованы: %s",
+                        names,
+                    )
+                names = filtered
+                if not names:
+                    continue
 
             entry = {"names": names} # Создаем запись для интерфейса
             if pattern := rule.get("pattern"): # Если есть pattern
@@ -3705,6 +4110,7 @@ def apply_interface_inventory(
     inventory: list,
     *,
     blocked_eth_parents: set[str] | None = None,
+    reserved: dict | None = None,
 ) -> dict:
     """Подменяет pattern → enum для узлов схемы, подходящих под инвентарь устройства."""
     if not inventory:
@@ -3721,6 +4127,11 @@ def apply_interface_inventory(
             for entry in inventory:
                 if _inventory_matches_schema_pattern(entry, schema_pattern):
                     names = list(entry["names"])
+                    if reserved:
+                        names = [
+                            n for n in names
+                            if not is_reserved_field_value("ifname", n, reserved)
+                        ]
                     if (
                         blocked_eth_parents
                         and schema_pattern.startswith("^eth")
@@ -3729,10 +4140,11 @@ def apply_interface_inventory(
                         filtered = [n for n in names if n not in blocked_eth_parents]
                         if filtered:
                             names = filtered
-                    obj["enum"] = names
-                    logger.debug(
-                        f"Инвентарь для pattern {schema_pattern!r}: {names}"
-                    )
+                    if names:
+                        obj["enum"] = names
+                        logger.debug(
+                            f"Инвентарь для pattern {schema_pattern!r}: {names}"
+                        )
                     break
         for value in obj.values():
             if isinstance(value, dict):
@@ -3835,6 +4247,7 @@ def apply_mock_data(
     schema: dict,
     mock_config: dict | None,
     pattern_index: dict[str, list] | None = None,
+    reserved: dict | None = None,
 ) -> dict:
     """
     Подменяет pattern → enum для mock-значений из dependencies.json.
@@ -3847,16 +4260,28 @@ def apply_mock_data(
     by_field = mock_config.get("by_field", {})
     schema = copy.deepcopy(schema)
 
+    def _filter_enum(field_name: str | None, values: list) -> list:
+        if not reserved:
+            return list(values)
+        if field_name:
+            return filter_reserved_values(list(values), field_name, reserved)
+        return [
+            value for value in values
+            if not is_reserved_field_value("ifname", value, reserved)
+        ]
+
     def _walk(obj: dict) -> None:
         if not isinstance(obj, dict):
             return
 
         pattern = obj.get("pattern")
         if pattern and pattern in pattern_index:
-            obj["enum"] = list(pattern_index[pattern])
-            logger.debug(
-                f"mock_data by_schema (pattern): {pattern_index[pattern]}"
-            )
+            filtered = _filter_enum(None, pattern_index[pattern])
+            if filtered:
+                obj["enum"] = filtered
+                logger.debug(
+                    f"mock_data by_schema (pattern): {filtered}"
+                )
 
         for prop_name, prop_schema in obj.get("properties", {}).items():
             if (
@@ -3864,8 +4289,10 @@ def apply_mock_data(
                 and isinstance(prop_schema, dict)
                 and not _schema_has_composition(prop_schema)
             ):
-                prop_schema["enum"] = list(by_field[prop_name])
-                logger.debug(f"mock_data by_field: {prop_name}={by_field[prop_name]}")
+                filtered = _filter_enum(prop_name, by_field[prop_name])
+                if filtered:
+                    prop_schema["enum"] = filtered
+                    logger.debug(f"mock_data by_field: {prop_name}={filtered}")
 
         for keyword in ("properties", "patternProperties"):
             for item in obj.get(keyword, {}).values():
@@ -3890,7 +4317,8 @@ def _apply_interface_lifecycle(scenario, target_endpoint, field_name, field_valu
                                main_action=None,
                                *, env_file: dict | None = None,
                                vid_pool: _VidPool | None = None,
-                               endpoint_rules: dict | None = None):
+                               endpoint_rules: dict | None = None,
+                               mock_by_field: dict[str, list] | None = None):
     """Setup/teardown для одного ifname (на любом уровне вложенности пейлоада)."""
     if field_value in handled_ifnames:
         return
@@ -3916,6 +4344,7 @@ def _apply_interface_lifecycle(scenario, target_endpoint, field_name, field_valu
             env_file=env_file,
             vid_pool=vid_pool,
             endpoint_rules=endpoint_rules,
+            mock_by_field=mock_by_field,
         )
     elif "setup" in requirements:
         logger.warning(
@@ -3933,6 +4362,7 @@ def _apply_interface_lifecycle(scenario, target_endpoint, field_name, field_valu
             template_ifname=field_value,
             env_file=env_file,
             vid_pool=vid_pool,
+            mock_by_field=mock_by_field,
         )
     elif "teardown" in requirements:
         logger.warning(
@@ -3977,6 +4407,7 @@ def _scan_payload_for_interfaces(
     request_schema: dict | None = None,
     lifecycle_config: dict | None = None,
     openapi_components: dict | None = None,
+    mock_by_field: dict[str, list] | None = None,
 ):
     """
     Ищет имена интерфейсов в payload и применяет lifecycle.
@@ -4019,6 +4450,7 @@ def _scan_payload_for_interfaces(
             env_file=env_file,
             vid_pool=vid_pool,
             endpoint_rules=endpoint_rules,
+            mock_by_field=mock_by_field,
         )
 
 
@@ -4033,6 +4465,7 @@ def _apply_field_mapping_dependencies(
     env_file: dict | None = None,
     vid_pool: _VidPool | None = None,
     endpoint_rules: dict | None = None,
+    mock_by_field: dict[str, list] | None = None,
 ):
     for dep_path, dep_info in deps.items():
         field = dep_info["field"]
@@ -4058,6 +4491,7 @@ def _apply_field_mapping_dependencies(
             env_file=env_file,
             vid_pool=vid_pool,
             endpoint_rules=endpoint_rules,
+            mock_by_field=mock_by_field,
         )
 
 
@@ -4071,6 +4505,7 @@ def build_test_scenarios(
     expected_coverage: set[str] | None = None,
     env_file: dict | None = None,
     openapi_components: dict | None = None,
+    reserved: dict | None = None,
 ):
     logger.info(f"Формирую тест-сценарии для {len(payload_records)} пейлоадов...")
     filepath = endpoint_to_test_file(target_endpoint, Path("tests"), method)
@@ -4093,8 +4528,10 @@ def build_test_scenarios(
             f"{auto_scalar_delete['id_field']}"
         )
     scenarios = []
-    vid_pool = _VidPool(env_file)
     env_file = env_file or {}
+    if reserved is None:
+        reserved = parse_reserved_values(dependencies_config, env_file)
+    vid_pool = _VidPool(env_file, reserved=reserved)
     lifecycle_config = parse_interface_lifecycle_config(dependencies_config)
     if lifecycle_config and openapi_components is None:
         openapi_components = load_openapi_components()
@@ -4105,7 +4542,9 @@ def build_test_scenarios(
         }
 
     for record in payload_records:
-        payload = synchronize_vid_ifname(record.payload, request_schema)
+        payload = synchronize_vid_ifname(
+            record.payload, request_schema, reserved=reserved,
+        )
         main_payload = copy.deepcopy(payload)
         variables = {_PLACEHOLDER_CONTEXT_KEY: copy.deepcopy(payload)}
 
@@ -4149,6 +4588,7 @@ def build_test_scenarios(
             env_file=env_file,
             vid_pool=vid_pool,
             endpoint_rules=endpoint_rules,
+            mock_by_field=mock_by_field,
         )
 
         # =====================================================================
@@ -4164,6 +4604,7 @@ def build_test_scenarios(
             request_schema=request_schema,
             lifecycle_config=lifecycle_config,
             openapi_components=openapi_components,
+            mock_by_field=mock_by_field,
         )
 
         # =====================================================================
@@ -4175,6 +4616,7 @@ def build_test_scenarios(
             env_file=env_file,
             vid_pool=vid_pool,
             endpoint_rules=endpoint_rules,
+            mock_by_field=mock_by_field,
         )
 
         # =====================================================================
@@ -4390,21 +4832,33 @@ def generate_single_endpoint(
     request_schema = resolved_endpoint['requestBody']['content']['application/json']['schema']
 
     clean_schema = preprocess_schema_for_jsf(request_schema)
+    reserved = parse_reserved_values(dependencies, env_file)
+    if reserved:
+        logger.info(
+            "reserved_values: поля %s",
+            sorted(reserved.get("by_field", {})),
+        )
     blocked_parents = build_eth_parents_with_vlan_children(interface_inventory or [])
     clean_schema = apply_interface_inventory(
-        clean_schema, interface_inventory, blocked_eth_parents=blocked_parents,
+        clean_schema,
+        interface_inventory,
+        blocked_eth_parents=blocked_parents,
+        reserved=reserved,
     )
     mock_config = parse_mock_data_config(dependencies)
     if mock_config:
         pattern_index = build_mock_pattern_index(
             load_openapi_components(), mock_config,
         )
-        clean_schema = apply_mock_data(clean_schema, mock_config, pattern_index)
+        clean_schema = apply_mock_data(
+            clean_schema, mock_config, pattern_index, reserved=reserved,
+        )
         logger.info(
             "mock_data: by_schema=%d, by_field=%d",
             len(mock_config.get("by_schema", {})),
             len(mock_config.get("by_field", {})),
         )
+    clean_schema = apply_reserved_values_to_schema(clean_schema, reserved)
     logger.debug("Схема препроцессирована для JSF")
 
     arguments = ResolveScheme.find_all_patterns_min_max(schema=clean_schema)
@@ -4422,7 +4876,7 @@ def generate_single_endpoint(
         clean_schema, compact=compact_coverage,
     )
     final_payloads = generate_value_coverage_payloads(
-        clean_schema, compact=compact_coverage,
+        clean_schema, compact=compact_coverage, reserved=reserved,
     )
     covered_fields = set()
     for record in final_payloads:
@@ -4441,6 +4895,7 @@ def generate_single_endpoint(
             break
         try:
             payload = _coerce_payload_to_schema(faker.generate(), clean_schema)
+            payload = scrub_reserved_payload(payload, reserved)
             valid, reason = _validate_payload(payload, clean_schema)
             if not valid:
                 logger.debug(f"Пропуск JSF-добора: {reason}")
@@ -4492,6 +4947,7 @@ def generate_single_endpoint(
         ollama=ollama,
         expected_coverage=expected_coverage,
         env_file=env_file,
+        reserved=reserved,
     )
 
     logger.info(
@@ -4545,7 +5001,21 @@ def main(argv: list[str] | None = None):
 
     # Загружаем переменные окружения
     env_vars = load_env_file()
-    interface_inventory = build_interface_inventory(dependencies, env_vars) # Строим инвентарь интерфейсов
+    reserved = parse_reserved_values(dependencies, env_vars)
+    if reserved:
+        logger.info(
+            "reserved_values загружены: %s",
+            {
+                field: sorted(
+                    (k[1] for k in keys),
+                    key=lambda v: (isinstance(v, str), v),
+                )
+                for field, keys in reserved.get("by_field", {}).items()
+            },
+        )
+    interface_inventory = build_interface_inventory(
+        dependencies, env_vars, reserved=reserved,
+    ) # Строим инвентарь интерфейсов
     if interface_inventory:
         logger.info(
             "Инвентарь интерфейсов: "

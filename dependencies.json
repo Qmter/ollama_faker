@@ -742,8 +742,11 @@
         {
           "pattern": "^eth(0|[1-9][0-9]{0,3})([\\.](0|[1-9][0-9]{0,3}))$",
           "env": "DEVICE_ETH_VLAN_IFNAMES",
+          "bind_fields": ["ifname", "ip_addr"],
           "teardown_priority": 11,
-          "setup": {
+          "setup": 
+          [
+          {
             "endpoint": "/interfaces/eth_vlan/add",
             "method": "POST",
             "payload": {
@@ -753,6 +756,23 @@
             "extract_to_variable": "created_ifname_eth_vlan",
             "response_extract": "data.ifname"
           },
+          {
+            "endpoint": "/interfaces/common/ip_address",
+            "method": "POST",
+            "payload": {
+              "ifname": "{{ifname}}",
+              "ip_addr": "{{ip_addr}}"
+            }
+          },
+          {
+            "endpoint": "/interfaces/shutdown",
+            "method": "POST",
+            "payload": {
+              "ifname": "{{ifname}}",
+              "adm_state": true
+            }
+          }
+          ],
           "teardown": [
             {
             "endpoint": "/interfaces/eth_vlan/delete",
@@ -989,6 +1009,7 @@
       "zone_name": ["zone1", "zone2"],
       "master_ip": ["10.0.0.1", "10.0.0.2"],
       "ip_address": ["10.0.0.1"],
+      "ip_addr": ["10.0.0.10/24", "10.0.0.20/24"],
       "priority": [0],
       "option_authoritative": ["10.0.0.1"],
       "option_recursive": ["10.0.0.1"],
@@ -997,6 +1018,19 @@
       "vrf": ["vrf1", "vrf2"],
       "acl_name": ["acl1", "acl2"],
       "access_list": ["acl1", "acl2"]
+    }
+  },
+  "reserved_values": {
+    "by_field": {
+      "ifname": [
+        "vlan0",
+        "vlan1",
+        "vlan603",
+        "vlan4095",
+        "switchport1"
+      ],
+      "vid": [0, 1, 603, 4095],
+      "vlan": ["0", "1", "603", "4095"]
     }
   }
 }
