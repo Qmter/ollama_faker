@@ -11,10 +11,9 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from jsf import JSF
-from ollama_orchestrator import OllamaOrchestrator
 from resolve_scheme import ResolveScheme
 from test_paths import endpoint_to_test_file
-from log_paths import build_log_path
+from log_paths import build_log_path, build_ollama_report_path
 
 # =============================================================================
 # ГЛОБАЛЬНАЯ НАСТРОЙКА ЛОГИРОВАНИЯ
@@ -2102,7 +2101,10 @@ def _field_lifecycle_phases(main_action: str | None, config: dict, target_endpoi
     """
     Какие фазы lifecycle нужны для field_mapping с учётом action в main_test.
     prerequisite → setup + teardown всегда.
-    ресурс того же эндпоинта: add→teardown, delete→setup, modify→оба.
+    ресурс того же эндпоинта:
+      add → teardown;
+      delete → setup + teardown (teardown — страховочная очистка, ошибка ОКма);
+      modify → оба.
     """
     if _is_prerequisite_field(config, target_endpoint):
         return {"setup", "teardown"}
@@ -2110,7 +2112,7 @@ def _field_lifecycle_phases(main_action: str | None, config: dict, target_endpoi
     if main_action == "add":
         return {"teardown"}
     if main_action == "delete":
-        return {"setup"}
+        return {"setup", "teardown"}
     if main_action == "modify":
         return {"setup", "teardown"}
     return {"setup", "teardown"}
@@ -2532,7 +2534,8 @@ def _should_skip_endpoint_rules_lifecycle_step(
     """
     Не дублировать lifecycle на том же эндпоинте, что и main_test:
     - setup /…/add при main add (или flat add без action);
-    - teardown /…/delete при main delete (или flat delete без action);
+    - teardown при main delete НЕ пропускаем: страховочная очистка
+      (ошибка teardown намеренно не проверяется раннером);
     - action.delete на том же path — setup add оставляем (datetime/dst).
     """
     if step_endpoint.rstrip("/") != target_endpoint.rstrip("/"):
@@ -2540,8 +2543,8 @@ def _should_skip_endpoint_rules_lifecycle_step(
     if phase == "setup":
         return main_action != "delete"
     if phase == "teardown":
-        if main_action == "delete":
-            return True
+        # Раньше пропускали teardown при main delete; теперь всегда оставляем
+        # для гарантированной очистки (как fail2ban / ACL).
         return main_action is None and target_endpoint.rstrip("/").endswith("/delete")
     return False
 
@@ -2881,6 +2884,202 @@ def synchronize_vid_ifname(
     """Копия payload с согласованными vid/ifname (только где vid уместен по схеме)."""
     result = copy.deepcopy(payload)
     _synchronize_vid_ifname_inplace(result, schema, reserved=reserved)
+    return result
+
+
+# =============================================================================
+# FIELD COUPLINGS (dependencies.json → field_couplings)
+# =============================================================================
+def _path_exists_in_payload(payload: dict, path: str) -> bool:
+    """True, если dotted-путь существует (значение может быть любым, включая None)."""
+    current: Any = payload
+    for part in path.split("."):
+        if not part or not isinstance(current, dict) or part not in current:
+            return False
+        current = current[part]
+    return True
+
+
+def _get_path_value(payload: dict, path: str):
+    """Скаляр/значение по dotted-пути; KeyError-эквивалент → отсутствует."""
+    current: Any = payload
+    for part in path.split("."):
+        if not part or not isinstance(current, dict) or part not in current:
+            return _PLACEHOLDER_MISSING
+        current = current[part]
+    return current
+
+
+def _endpoint_matches_coupling(endpoint: str, endpoints_filter: list[str] | None) -> bool:
+    if not endpoints_filter:
+        return True
+    for item in endpoints_filter:
+        if not isinstance(item, str) or not item:
+            continue
+        if endpoint == item or endpoint.startswith(f"{item}/"):
+            return True
+    return False
+
+
+def _when_coupling_matches(payload: dict, when: dict) -> bool:
+    path = when.get("path")
+    if not isinstance(path, str) or not path.strip():
+        return False
+    path = path.strip()
+    if when.get("present") is True:
+        return _path_exists_in_payload(payload, path)
+    if "in" not in when:
+        return False
+    allowed = when.get("in")
+    if not isinstance(allowed, list) or not allowed:
+        return False
+    value = _get_path_value(payload, path)
+    if value is _PLACEHOLDER_MISSING:
+        return False
+    return value in allowed
+
+
+def _resolve_ensure_value(
+    spec: Any,
+    *,
+    mock_by_field: dict,
+    ensure_path: str,
+) -> Any:
+    """Извлекает значение для ensure-поля из value / values / from_mock."""
+    if not isinstance(spec, dict):
+        return spec
+    if "value" in spec:
+        return spec["value"]
+    if "values" in spec:
+        values = spec["values"]
+        if isinstance(values, list) and values:
+            return values[0]
+        logger.warning(
+            "field_couplings: ensure %s — пустой values",
+            ensure_path,
+        )
+        return _PLACEHOLDER_MISSING
+    mock_key = spec.get("from_mock")
+    if isinstance(mock_key, str) and mock_key.strip():
+        values = mock_by_field.get(mock_key.strip())
+        if isinstance(values, list) and values:
+            return values[0]
+        logger.warning(
+            "field_couplings: ensure %s — нет mock_data.by_field[%r]",
+            ensure_path,
+            mock_key,
+        )
+        return _PLACEHOLDER_MISSING
+    logger.warning(
+        "field_couplings: ensure %s — неизвестный источник %s",
+        ensure_path,
+        sorted(spec.keys()),
+    )
+    return _PLACEHOLDER_MISSING
+
+
+def parse_field_couplings(dependencies: dict) -> list[dict]:
+    """Читает field_couplings из dependencies.json; битые правила пропускает."""
+    raw = dependencies.get("field_couplings")
+    if not isinstance(raw, list):
+        return []
+    parsed: list[dict] = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            logger.warning("field_couplings[%d]: ожидался объект", index)
+            continue
+        when = item.get("when")
+        ensure = item.get("ensure")
+        if not isinstance(when, dict) or not isinstance(ensure, dict) or not ensure:
+            logger.warning(
+                "field_couplings[%d]: нужны when (object) и ensure (object)",
+                index,
+            )
+            continue
+        when_path = when.get("path")
+        if not isinstance(when_path, str) or not when_path.strip():
+            logger.warning("field_couplings[%d]: when.path обязателен", index)
+            continue
+        if when.get("present") is not True and not isinstance(when.get("in"), list):
+            logger.warning(
+                "field_couplings[%d]: when нужен present:true или in:[...]",
+                index,
+            )
+            continue
+        endpoints = item.get("endpoints")
+        if endpoints is not None and not isinstance(endpoints, list):
+            logger.warning("field_couplings[%d]: endpoints должен быть списком", index)
+            continue
+        only_if_missing = item.get("only_if_missing", True)
+        parsed.append({
+            "endpoints": [
+                ep for ep in (endpoints or [])
+                if isinstance(ep, str) and ep.strip()
+            ] or None,
+            "when": {
+                "path": when_path.strip(),
+                **(
+                    {"present": True}
+                    if when.get("present") is True
+                    else {"in": list(when.get("in") or [])}
+                ),
+            },
+            "ensure": dict(ensure),
+            "only_if_missing": bool(only_if_missing),
+        })
+    return parsed
+
+
+def apply_field_couplings(
+    payload: dict,
+    *,
+    endpoint: str,
+    couplings: list[dict],
+    mock_by_field: dict | None = None,
+) -> dict:
+    """
+    Дополняет payload связанными полями по field_couplings.
+    По умолчанию не перезаписывает уже заданные ensure-пути.
+    """
+    if not couplings or not isinstance(payload, dict):
+        return payload
+    mock_by_field = mock_by_field or {}
+    result = copy.deepcopy(payload)
+    for rule in couplings:
+        if not _endpoint_matches_coupling(endpoint, rule.get("endpoints")):
+            continue
+        when = rule.get("when") or {}
+        if not _when_coupling_matches(result, when):
+            continue
+        only_if_missing = rule.get("only_if_missing", True)
+        for ensure_path, spec in (rule.get("ensure") or {}).items():
+            if not isinstance(ensure_path, str) or not ensure_path.strip():
+                continue
+            ensure_path = ensure_path.strip()
+            if only_if_missing and _path_exists_in_payload(result, ensure_path):
+                continue
+            value = _resolve_ensure_value(
+                spec,
+                mock_by_field=mock_by_field,
+                ensure_path=ensure_path,
+            )
+            if value is _PLACEHOLDER_MISSING:
+                continue
+            set_nested_value(result, ensure_path, value)
+            trigger = when.get("path", "?")
+            trigger_val = _get_path_value(result, trigger)
+            trigger_repr = (
+                trigger_val
+                if trigger_val is not _PLACEHOLDER_MISSING
+                else "present"
+            )
+            logger.info(
+                "field_couplings: %s=%r (when %s=%r)",
+                ensure_path,
+                value,
+                trigger,
+                trigger_repr,
+            )
     return result
 
 
@@ -4501,7 +4700,6 @@ def _apply_field_mapping_dependencies(
 def build_test_scenarios(
     target_endpoint, method, payload_records, dependencies_config,
     request_schema: dict | None = None,
-    ollama: OllamaOrchestrator | None = None,
     expected_coverage: set[str] | None = None,
     env_file: dict | None = None,
     openapi_components: dict | None = None,
@@ -4517,6 +4715,9 @@ def build_test_scenarios(
     mock_by_field = (parse_mock_data_config(dependencies_config) or {}).get(
         "by_field", {},
     )
+    field_couplings = parse_field_couplings(dependencies_config)
+    if field_couplings:
+        logger.info("field_couplings: загружено правил: %d", len(field_couplings))
     synthetic_bind_fields = dependencies_config.get("synthetic_bind_fields", {})
     auto_scalar_delete = (
         detect_scalar_delete_action_pattern(request_schema)
@@ -4544,6 +4745,12 @@ def build_test_scenarios(
     for record in payload_records:
         payload = synchronize_vid_ifname(
             record.payload, request_schema, reserved=reserved,
+        )
+        payload = apply_field_couplings(
+            payload,
+            endpoint=target_endpoint,
+            couplings=field_couplings,
+            mock_by_field=mock_by_field,
         )
         main_payload = copy.deepcopy(payload)
         variables = {_PLACEHOLDER_CONTEXT_KEY: copy.deepcopy(payload)}
@@ -4645,17 +4852,9 @@ def build_test_scenarios(
             teardown_step["payload"] = _replace_placeholders(teardown_step["payload"], variables)
 
         # =====================================================================
-        # DESCRIPTION (OPTIONAL OLLAMA)
+        # DESCRIPTION
         # =====================================================================
-        default_description = f"Auto-test: {method.upper()} {target_endpoint}"
-        if ollama and ollama.has_feature("describe"):
-            try:
-                scenario["description"] = ollama.generate_test_description(scenario)
-            except Exception as e:
-                logger.warning(f"Failed to generate description: {e}")
-                scenario["description"] = default_description
-        else:
-            scenario["description"] = default_description
+        scenario["description"] = f"Auto-test: {method.upper()} {target_endpoint}"
 
         for teardown_step in scenario["teardown"]:
             teardown_step.pop("expected_status", None)
@@ -4736,14 +4935,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Параллельная генерация в N процессах (только при 2+ эндпоинтах; по умолчанию 1)",
     )
     parser.add_argument(
-        "--ollama",
+        "--ollama-log",
         action="store_true",
-        help="Ollama: описания тестов и читаемые имена ресурсов (английский)",
-    )
-    parser.add_argument(
-        "--ollama-features",
-        metavar="LIST",
-        help="Фичи Ollama через запятую: describe, enrich (по умолчанию: describe,enrich)",
+        help="После генерации: отчёт Ollama по gen-логу в logs/ollama_gen_*.md",
     )
     return parser.parse_args(argv)
 
@@ -4818,7 +5012,6 @@ def generate_single_endpoint(
     interface_inventory: dict | None,
     *,
     compact_coverage: bool,
-    ollama: OllamaOrchestrator,
     env_file: dict | None = None,
 ) -> str:
     """Генерирует тесты для одного POST-эндпоинта. Возвращает путь эндпоинта."""
@@ -4927,24 +5120,9 @@ def generate_single_endpoint(
     final_payloads = dedupe_payloads(final_payloads)
     logger.info(f"Итого уникальных пейлоадов: {len(final_payloads)}")
 
-    if ollama.has_feature("enrich"):
-        field_schemas = ResolveScheme.extract_field_schemas(clean_schema)
-        enriched_payloads = ollama.enrich_payloads(
-            [record.payload for record in final_payloads],
-            clean_schema,
-            field_schemas,
-            target_endpoint,
-            method=method.upper(),
-        )
-        final_payloads = [
-            PayloadCoverage(payload, record.coverage_keys)
-            for payload, record in zip(enriched_payloads, final_payloads)
-        ]
-
     build_test_scenarios(
         target_endpoint, method, final_payloads, dependencies,
         request_schema=clean_schema,
-        ollama=ollama,
         expected_coverage=expected_coverage,
         env_file=env_file,
         reserved=reserved,
@@ -4959,13 +5137,11 @@ def generate_single_endpoint(
 def _generate_endpoint_task(job: dict) -> _EndpointTaskResult:
     log_buffer = _configure_worker_capture_logging(job["verbose"])
     try:
-        ollama = OllamaOrchestrator.from_cli(job["use_ollama"], job["ollama_features"])
         endpoint = generate_single_endpoint(
             job["target_endpoint"],
             job["dependencies"],
             job["interface_inventory"],
             compact_coverage=job["compact_coverage"],
-            ollama=ollama,
             env_file=job.get("env_file"),
         )
         return _EndpointTaskResult(endpoint, log_buffer)
@@ -4992,7 +5168,6 @@ def main(argv: list[str] | None = None):
     logger.info("Запуск генератора тестов...")
     logger.info(f"Лог: {log_path.as_posix()}")
     start_main = time.time()
-    ollama = OllamaOrchestrator.from_cli(args.ollama, args.ollama_features)
     
     # Открываем файл с зависимостями
     with open("dependencies.json", "r", encoding="utf-8") as f:
@@ -5061,8 +5236,6 @@ def main(argv: list[str] | None = None):
                     "dependencies": dependencies,
                     "interface_inventory": interface_inventory,
                     "compact_coverage": args.compact_coverage,
-                    "use_ollama": args.ollama,
-                    "ollama_features": args.ollama_features,
                     "verbose": args.verbose,
                     "env_file": env_vars,
                 }
@@ -5086,7 +5259,6 @@ def main(argv: list[str] | None = None):
                         dependencies,
                         interface_inventory,
                         compact_coverage=args.compact_coverage,
-                        ollama=ollama,
                         env_file=env_vars,
                     )
                 except Exception as e:
@@ -5094,6 +5266,29 @@ def main(argv: list[str] | None = None):
                     raise
     finally:
         _write_generation_summary(start_main, len(endpoints))
+        if args.ollama_log:
+            from ollama_orchestrator import (
+                OllamaOrchestrator,
+                build_generation_analysis_context,
+            )
+
+            ollama = OllamaOrchestrator.from_cli(True)
+            report_path = build_ollama_report_path(
+                "gen",
+                endpoints=args.endpoint,
+                dir_prefixes=args.dir,
+            )
+            context = build_generation_analysis_context(
+                gen_log_path=log_path,
+                endpoints=endpoints,
+                elapsed_sec=time.time() - start_main,
+            )
+            body = ollama.analyze_generation(context)
+            written = ollama.write_report(
+                report_path, body, context=context, kind="gen",
+            )
+            logger.info("Ollama-отчёт генерации: %s", written.as_posix())
+            print(f"Ollama-отчёт: {written.as_posix()}")
 
 
 if __name__ == "__main__":

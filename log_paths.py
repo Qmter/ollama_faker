@@ -8,11 +8,13 @@
     logs/gen_20260714_091500_all.log
     logs/run_20260714_091500_interfaces.log
     logs/clear_20260714_091500_dns_client.log
+    logs/ollama_run_20260714_091500_interfaces.md
 
 prefix:
     gen   — генерация тестов (main.py)
     run   — прогон тестов (run_tests.py)
     clear — предочистка (clear_for_tests.py)
+    ollama_run / ollama_gen — отчёты Ollama (Markdown)
 
 scope (что запускали):
     all              — без -e и без -d (весь набор)
@@ -144,3 +146,21 @@ def resolve_cli_log_file(
         endpoints=endpoints,
         dir_prefixes=dir_prefixes,
     )
+
+
+def build_ollama_report_path(
+    kind: str,
+    *,
+    endpoints: list[str] | None = None,
+    dir_prefixes: list[str] | None = None,
+    timestamp: str | None = None,
+) -> Path:
+    """
+    Путь к Markdown-отчёту Ollama.
+
+    kind: "run" (после run_tests.py) | "gen" (после main.py)
+    """
+    ts = timestamp or time.strftime("%Y%m%d_%H%M%S")
+    scope = resolve_log_scope(endpoints=endpoints, dir_prefixes=dir_prefixes)
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    return LOG_DIR / f"ollama_{kind}_{ts}_{scope}.md"

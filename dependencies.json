@@ -959,7 +959,8 @@
             "payload": {
               "ifname": "{{ifname}}",
               "settings": {
-                "source": "1.1.1.1"
+                "source": "1.1.1.1",
+                "dst_address": "10.0.0.2"
               }
             },
             "extract_to_variable": "created_ifname_tunnel",
@@ -1010,6 +1011,7 @@
       "master_ip": ["10.0.0.1", "10.0.0.2"],
       "ip_address": ["10.0.0.1"],
       "ip_addr": ["10.0.0.10/24", "10.0.0.20/24"],
+      "dst_address": ["10.0.0.2", "10.0.0.3"],
       "priority": [0],
       "option_authoritative": ["10.0.0.1"],
       "option_recursive": ["10.0.0.1"],
@@ -1020,6 +1022,19 @@
       "access_list": ["acl1", "acl2"]
     }
   },
+  "field_couplings": [
+    {
+      "endpoints": ["/interfaces/tunnel/add"],
+      "when": {
+        "path": "settings.mode",
+        "in": ["gretap"]
+      },
+      "ensure": {
+        "settings.dst_address": { "from_mock": "dst_address" }
+      },
+      "only_if_missing": true
+    }
+  ],
   "reserved_values": {
     "by_field": {
       "ifname": [

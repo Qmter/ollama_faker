@@ -18,8 +18,6 @@ from main import (
     build_test_scenarios,
     scan_payload_for_dependencies,
 )
-from ollama_orchestrator import OllamaOrchestrator
-
 
 class ScanDependenciesTests(unittest.TestCase):
     def test_finds_top_level_field(self):
@@ -154,6 +152,12 @@ class EndpointRulesTests(unittest.TestCase):
     def test_self_skip_same_endpoint_teardown_on_delete(self):
         self.assertTrue(_should_skip_endpoint_rules_lifecycle_step(
             "teardown", "/telnet/delete", "/telnet/delete", None,
+        ))
+
+    def test_keep_teardown_insurance_when_main_is_delete(self):
+        """Страховочный teardown при main delete не пропускаем."""
+        self.assertFalse(_should_skip_endpoint_rules_lifecycle_step(
+            "teardown", "/acl/acl_ipv4", "/acl/acl_ipv4", "delete",
         ))
 
     def test_keep_prefix_setup_for_config_endpoint(self):
@@ -326,7 +330,6 @@ class FilterIpv4ScenarioTests(unittest.TestCase):
         }
 
     def test_delete_without_acl_name_resolves_placeholders(self):
-        ollama = OllamaOrchestrator.from_cli(False)
         records = [
             PayloadCoverage(
                 {
@@ -349,7 +352,6 @@ class FilterIpv4ScenarioTests(unittest.TestCase):
                     "post",
                     records,
                     self._filter_deps(),
-                    ollama=ollama,
                 )
                 scenario = json.loads(
                     Path(
@@ -373,7 +375,6 @@ class FilterIpv4ScenarioTests(unittest.TestCase):
 
 class DnsProxyControlScenarioTests(unittest.TestCase):
     def test_top_level_lifecycle_applies_for_string_action(self):
-        ollama = OllamaOrchestrator.from_cli(False)
         deps = {
             "field_mappings": {
                 "vrf_name": {
@@ -446,7 +447,6 @@ class DnsProxyControlScenarioTests(unittest.TestCase):
                     "post",
                     records,
                     deps,
-                    ollama=ollama,
                 )
                 scenario = json.loads(
                     Path(
@@ -517,7 +517,6 @@ class SkipTargetsTests(unittest.TestCase):
         )
 
     def test_slave_add_has_no_master_zone_setup(self):
-        ollama = OllamaOrchestrator.from_cli(False)
         zone_mapping = {
             "requirements": ["setup", "teardown"],
             "skip_targets": [
@@ -570,7 +569,6 @@ class SkipTargetsTests(unittest.TestCase):
                     "post",
                     records,
                     deps,
-                    ollama=ollama,
                 )
                 scenario = json.loads(
                     Path(
@@ -587,7 +585,6 @@ class SkipTargetsTests(unittest.TestCase):
 
 class ZoneEntryScenarioTests(unittest.TestCase):
     def test_entry_delete_setup_by_entry_type(self):
-        ollama = OllamaOrchestrator.from_cli(False)
         deps = {
             "field_mappings": {
                 "zone_name": {
@@ -656,7 +653,6 @@ class ZoneEntryScenarioTests(unittest.TestCase):
                     "post",
                     records,
                     deps,
-                    ollama=ollama,
                 )
                 scenario = json.loads(
                     Path(

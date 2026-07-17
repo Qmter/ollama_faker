@@ -86,10 +86,10 @@ class FieldLifecyclePhasesTests(unittest.TestCase):
         phases = _field_lifecycle_phases("add", config, "/x")
         self.assertEqual(phases, {"teardown"})
 
-    def test_delete_action_only_setup(self):
+    def test_delete_action_setup_and_teardown(self):
         config = {"setup": {"endpoint": "/x"}, "teardown": {"endpoint": "/x"}}
         phases = _field_lifecycle_phases("delete", config, "/x")
-        self.assertEqual(phases, {"setup"})
+        self.assertEqual(phases, {"setup", "teardown"})
 
 
 class PrerequisiteFieldTests(unittest.TestCase):

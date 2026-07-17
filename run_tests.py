@@ -28,7 +28,11 @@ from main import (
     resolve_target_endpoints,
 )
 from test_paths import endpoint_to_test_file
-from log_paths import resolve_cli_log_file
+from log_paths import build_ollama_report_path, resolve_cli_log_file
+from ollama_orchestrator import (
+    OllamaOrchestrator,
+    build_run_analysis_context,
+)
 
 logger = logging.getLogger("RUNNER")
 
@@ -86,6 +90,12 @@ class EndpointRunResult:
     endpoint: str
     status: str
     failed_test_ids: list[int] = field(default_factory=list)
+
+
+@dataclass
+class FailedScenarioRecord:
+    result: ScenarioResult
+    scenario: dict[str, Any]
 
 
 def configure_logging(*, verbose: bool, log_file: str | Path) -> None:
@@ -179,6 +189,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="При «already exists»: teardown → повтор setup/main (по умолчанию: включено)",
+    )
+    parser.add_argument(
+        "--ollama-log",
+        action="store_true",
+        help="После прогона: отчёт Ollama (генератор vs баг API) в logs/ollama_run_*.md",
     )
     return parser.parse_args(argv)
 
@@ -849,6 +864,64 @@ def _finalize_run(
     _write_run_summary(log_file, summary, elapsed_sec, endpoints_count)
 
 
+def _write_ollama_run_report(
+    *,
+    args: argparse.Namespace,
+    log_path: Path,
+    summary: RunSummary,
+    endpoint_results: list[EndpointRunResult],
+    failed_scenarios: list[FailedScenarioRecord],
+    elapsed_sec: float,
+    endpoints_count: int,
+) -> Path | None:
+    ollama = OllamaOrchestrator.from_cli(args.ollama_log)
+    report_path = build_ollama_report_path(
+        "run",
+        endpoints=args.endpoint,
+        dir_prefixes=args.dir,
+    )
+    context = build_run_analysis_context(
+        failures=failed_scenarios,
+        summary=summary,
+        endpoint_results=endpoint_results,
+        run_log_path=log_path,
+        elapsed_sec=elapsed_sec,
+        endpoints_count=endpoints_count,
+    )
+    body = ollama.analyze_run(context)
+    return ollama.write_report(report_path, body, context=context, kind="run")
+
+
+def _complete_run(
+    *,
+    args: argparse.Namespace,
+    log_path: Path,
+    summary: RunSummary,
+    endpoint_results: list[EndpointRunResult],
+    failed_scenarios: list[FailedScenarioRecord],
+    elapsed_sec: float,
+    endpoints_count: int,
+) -> Path | None:
+    _finalize_run(
+        log_file=str(log_path),
+        summary=summary,
+        endpoint_results=endpoint_results,
+        elapsed_sec=elapsed_sec,
+        endpoints_count=endpoints_count,
+    )
+    if not args.ollama_log:
+        return None
+    return _write_ollama_run_report(
+        args=args,
+        log_path=log_path,
+        summary=summary,
+        endpoint_results=endpoint_results,
+        failed_scenarios=failed_scenarios,
+        elapsed_sec=elapsed_sec,
+        endpoints_count=endpoints_count,
+    )
+
+
 def _load_scenarios(path: Path) -> list[dict]:
     with path.open(encoding="utf-8") as file:
         data = json.load(file)
@@ -878,6 +951,7 @@ def main(argv: list[str] | None = None) -> int:
     session = _build_http_session(env_file)
     summary = RunSummary()
     endpoint_results: list[EndpointRunResult] = []
+    failed_scenarios: list[FailedScenarioRecord] = []
 
     logger.info("Запуск тестов REST API")
     logger.info(f"Base URL : {base_url}")
@@ -886,6 +960,7 @@ def main(argv: list[str] | None = None) -> int:
     logger.info(f"Verbose  : {args.verbose}")
     logger.info(f"Teardown retries: {args.max_teardown_retry}")
     logger.info(f"Recover already exists: {args.recover_already_exists}")
+    logger.info(f"Ollama log : {args.ollama_log}")
     logger.info(_SEPARATOR)
 
     with open("openapi.json", encoding="utf-8") as file:
@@ -928,10 +1003,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if not endpoint_files:
         logger.error("Нет тестов для запуска")
-        _finalize_run(
-            log_file=str(log_path),
+        _complete_run(
+            args=args,
+            log_path=log_path,
             summary=summary,
             endpoint_results=endpoint_results,
+            failed_scenarios=failed_scenarios,
             elapsed_sec=time.time() - started_at,
             endpoints_count=len(endpoints),
         )
@@ -989,6 +1066,12 @@ def main(argv: list[str] | None = None) -> int:
                 summary.failed_scenarios += 1
                 endpoint_failed += 1
                 endpoint_failed_test_ids.append(scenario_result.test_id)
+                failed_scenarios.append(
+                    FailedScenarioRecord(
+                        result=scenario_result,
+                        scenario=copy.deepcopy(scenario),
+                    ),
+                )
                 exit_code = 1
                 if args.stop_on_failure:
                     logger.error("Остановка по --stop-on-failure")
@@ -1005,13 +1088,17 @@ def main(argv: list[str] | None = None) -> int:
                             failed_test_ids=endpoint_failed_test_ids,
                         ),
                     )
-                    _finalize_run(
-                        log_file=str(log_path),
+                    ollama_report = _complete_run(
+                        args=args,
+                        log_path=log_path,
                         summary=summary,
                         endpoint_results=endpoint_results,
+                        failed_scenarios=failed_scenarios,
                         elapsed_sec=time.time() - started_at,
                         endpoints_count=len(endpoints),
                     )
+                    if ollama_report:
+                        print(f"Ollama-отчёт: {ollama_report.as_posix()}")
                     return exit_code
 
         _log_endpoint_block_end(
@@ -1029,10 +1116,12 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     elapsed = time.time() - started_at
-    _finalize_run(
-        log_file=str(log_path),
+    ollama_report = _complete_run(
+        args=args,
+        log_path=log_path,
         summary=summary,
         endpoint_results=endpoint_results,
+        failed_scenarios=failed_scenarios,
         elapsed_sec=elapsed,
         endpoints_count=len(endpoints),
     )
@@ -1043,6 +1132,8 @@ def main(argv: list[str] | None = None) -> int:
         f"сценариев PASS/FAIL: {summary.passed_scenarios}/{summary.failed_scenarios} | "
         f"лог: {log_path.as_posix()}"
     )
+    if ollama_report:
+        print(f"Ollama-отчёт: {ollama_report.as_posix()}")
     if summary.skipped_files:
         print(f"Пропущено файлов: {len(summary.skipped_files)}")
 

@@ -10,8 +10,6 @@ from main import (
     PayloadCoverage,
     build_test_scenarios,
 )
-from ollama_orchestrator import OllamaOrchestrator
-
 
 MINIMAL_DEPS = {
     "field_mappings": {},
@@ -32,7 +30,6 @@ MINIMAL_DEPS = {
 
 class BuildTestScenariosTests(unittest.TestCase):
     def test_writes_scenario_json(self):
-        ollama = OllamaOrchestrator.from_cli(False)
         records = [
             PayloadCoverage({"ifname": "bond0"}, ["__minimal__"]),
         ]
@@ -54,7 +51,6 @@ class BuildTestScenariosTests(unittest.TestCase):
                     records,
                     MINIMAL_DEPS,
                     request_schema=schema,
-                    ollama=ollama,
                 )
                 out = Path("tests/interfaces/interfaces_bonding_add_post.json")
                 self.assertTrue(out.is_file())
@@ -67,7 +63,6 @@ class BuildTestScenariosTests(unittest.TestCase):
                 os.chdir(prev)
 
     def test_bond_lifecycle_in_scenario(self):
-        ollama = OllamaOrchestrator.from_cli(False)
         records = [PayloadCoverage({"ifname": "bond1"}, ["ifname=bond1"])]
         schema = {
             "type": "object",
@@ -85,7 +80,6 @@ class BuildTestScenariosTests(unittest.TestCase):
                     records,
                     MINIMAL_DEPS,
                     request_schema=schema,
-                    ollama=ollama,
                 )
                 scenario = json.loads(
                     Path("tests/interfaces/interfaces_bonding_add_post.json").read_text(encoding="utf-8"),
@@ -100,7 +94,6 @@ class BuildTestScenariosTests(unittest.TestCase):
 
     def test_vlan_add_syncs_vid_with_ifname_and_vlandb(self):
         """vid в main_test и vlandb teardown должны совпадать с ifname (vlan4092 → 4092)."""
-        ollama = OllamaOrchestrator.from_cli(False)
         deps = {
             "field_mappings": {},
             "interface_rules": {
@@ -160,7 +153,6 @@ class BuildTestScenariosTests(unittest.TestCase):
                     records,
                     deps,
                     request_schema=schema,
-                    ollama=ollama,
                 )
                 scenario = json.loads(
                     Path("tests/interfaces/interfaces_vlan_add_post.json").read_text(encoding="utf-8"),
@@ -178,7 +170,6 @@ class BuildTestScenariosTests(unittest.TestCase):
 
     def test_common_arp_main_test_has_no_spurious_vid(self):
         """main_test без vid в схеме не должен получать vid из synchronize_vid_ifname."""
-        ollama = OllamaOrchestrator.from_cli(False)
         deps = {
             "field_mappings": {},
             "interface_rules": {
@@ -225,7 +216,6 @@ class BuildTestScenariosTests(unittest.TestCase):
                     records,
                     deps,
                     request_schema=schema,
-                    ollama=ollama,
                 )
                 scenario = json.loads(
                     Path("tests/interfaces/interfaces_common_arp_post.json").read_text(
@@ -258,7 +248,6 @@ class BuildTestScenariosTests(unittest.TestCase):
             preprocess_schema_for_jsf,
         )
 
-        ollama = OllamaOrchestrator.from_cli(False)
         deps_path = Path(__file__).resolve().parent.parent / "dependencies.json"
         with open(deps_path, encoding="utf-8") as f:
             deps = json.load(f)
@@ -299,7 +288,6 @@ class BuildTestScenariosTests(unittest.TestCase):
                     records,
                     deps,
                     request_schema=schema,
-                    ollama=ollama,
                 )
                 scenarios = json.loads(
                     Path("tests/fail2ban/fail2ban_jail_add_post.json").read_text(
@@ -334,7 +322,6 @@ class BuildTestScenariosTests(unittest.TestCase):
             preprocess_schema_for_jsf,
         )
 
-        ollama = OllamaOrchestrator.from_cli(False)
         deps = {
             "field_mappings": {},
             "interface_rules": {
@@ -414,7 +401,6 @@ class BuildTestScenariosTests(unittest.TestCase):
                     records,
                     deps,
                     request_schema=tunnel_schema,
-                    ollama=ollama,
                 )
                 scenarios = json.loads(
                     Path("tests/interfaces/interfaces_tunnel_add_post.json").read_text(
@@ -461,7 +447,6 @@ class BuildTestScenariosTests(unittest.TestCase):
             preprocess_schema_for_jsf,
         )
 
-        ollama = OllamaOrchestrator.from_cli(False)
         deps_path = Path(__file__).resolve().parent.parent / "dependencies.json"
         with open(deps_path, encoding="utf-8") as f:
             deps = json.load(f)
@@ -508,7 +493,6 @@ class BuildTestScenariosTests(unittest.TestCase):
                     records,
                     deps,
                     request_schema=schema,
-                    ollama=ollama,
                 )
                 scenario = json.loads(
                     Path("tests/interfaces/interfaces_bonding_mode_post.json").read_text(
@@ -539,7 +523,6 @@ class BuildTestScenariosTests(unittest.TestCase):
 
     def test_eth_vlan_add_self_skip_omits_post_create_setup(self):
         """Тест eth_vlan/add: ip/shutdown из lifecycle не в setup (интерфейса ещё нет)."""
-        ollama = OllamaOrchestrator.from_cli(False)
         deps_path = Path(__file__).resolve().parent.parent / "dependencies.json"
         with open(deps_path, encoding="utf-8") as f:
             deps = json.load(f)
@@ -558,7 +541,6 @@ class BuildTestScenariosTests(unittest.TestCase):
                     "post",
                     records,
                     deps,
-                    ollama=ollama,
                 )
                 scenario = json.loads(
                     Path(
@@ -574,7 +556,6 @@ class BuildTestScenariosTests(unittest.TestCase):
 
     def test_eth_vlan_bind_fields_fills_ip_addr_from_mock(self):
         """interface_rules.bind_fields + mock_data.by_field → {{ip_addr}} подставляется."""
-        ollama = OllamaOrchestrator.from_cli(False)
         deps = {
             "field_mappings": {},
             "interface_rules": {
@@ -645,7 +626,6 @@ class BuildTestScenariosTests(unittest.TestCase):
                     "post",
                     records,
                     deps,
-                    ollama=ollama,
                 )
                 scenario = json.loads(
                     Path(
