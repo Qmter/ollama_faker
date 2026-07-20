@@ -1,5 +1,55 @@
 {
   "field_mappings": {
+    "time_range": {
+      "setup": {
+        "endpoint": "/acl/time_range/configuration",
+        "method": "POST",
+        "payload": {
+          "action": {
+            "add": {
+              "name": "{{time_range}}",
+              "configuration": {}
+            }
+          }
+        },
+        "extract_to_variable": "created_time_range",
+        "response_extract": "data.name"
+      },
+      "teardown": {
+        "endpoint": "/acl/time_range/configuration",
+        "method": "POST",
+        "payload": {
+          "action": {
+            "delete": {
+              "name": "{{time_range}}"
+            }
+          }
+        }
+      }
+    },
+    "track_value": {
+      "setup": {
+        "endpoint": "/ipsla",
+        "method": "POST",
+        "payload": {
+          "action": {
+            "add": {
+              "tracker_name": "{{track_value}}",
+              "type": "logical"
+            }
+          }
+        }
+      },
+      "teardown": {
+        "endpoint": "/ipsla",
+        "method": "POST",
+        "payload": {
+          "action": {
+            "delete": "{{track_value}}"
+          }
+        }
+      }
+    },
     "zone_name": {
       "requirements": ["setup", "teardown"],
       "skip_targets": [
@@ -996,14 +1046,18 @@
   },
   "mock_data": {
     "by_schema": {
+      "FILTER_PORT_LISTING": ["6:17"],
       "IP_ADDR": ["10.0.0.1", "10.0.0.2", "10.0.0.3"],
       "IP_ADDR_WITH_BIT_MASK": ["10.0.0.1/24", "10.0.0.2/24", "10.0.0.3/24"],
       "IPV6_ADDR": ["2001:db8::1", "2001:db8::2"],
       "IPV6_ADDR_WITH_BIT_MASK": ["2001:db8:1::1/64", "2001:db8:2::1/64"]
     },
     "by_field": {
+      "time_range": ["time_range1"],
       "key_name": ["key1", "key2"],
       "date": ["23.12.2025"],
+      "ininterface": ["eth1", "eth2"],
+      "outinterface": ["eth1", "eth2"],
       "time": ["12:00"],
       "timezone": ["Europe/Moscow"],
       "description": ["", "autotest-desc"],
@@ -1019,7 +1073,10 @@
       "vrf_name": ["vrf1", "vrf2"],
       "vrf": ["vrf1", "vrf2"],
       "acl_name": ["acl1", "acl2"],
-      "access_list": ["acl1", "acl2"]
+      "access_list": ["acl1", "acl2"],
+      "index": [1],
+      "igmp_dest_addr": ["224.0.0.1", "239.1.1.1"],
+      "igmp_src_addr": ["224.0.0.1", "239.1.1.1"]
     }
   },
   "field_couplings": [
@@ -1033,6 +1090,176 @@
         "settings.dst_address": { "from_mock": "dst_address" }
       },
       "only_if_missing": true
+    },
+    {
+      "endpoints": ["/acl/acl_ipv4"],
+      "when": {
+        "path": "action.add.rule.icmp",
+        "present": true
+      },
+      "ensure": {
+        "action.add.rule.protocol": { "value": { "protocol_name": "icmp" } }
+      },
+      "remove": [
+        "action.add.rule.tcp_flags",
+        "action.add.rule.destinationports",
+        "action.add.rule.sourceports",
+        "action.add.rule.igmp_src",
+        "action.add.rule.igmp_dest"
+      ],
+      "only_if_missing": false
+    },
+    {
+      "endpoints": ["/acl/acl_ipv4"],
+      "when": {
+        "path": "action.delete.rule.icmp",
+        "present": true
+      },
+      "ensure": {
+        "action.delete.rule.protocol": { "value": { "protocol_name": "icmp" } }
+      },
+      "remove": [
+        "action.delete.rule.tcp_flags",
+        "action.delete.rule.destinationports",
+        "action.delete.rule.sourceports",
+        "action.delete.rule.igmp_src",
+        "action.delete.rule.igmp_dest"
+      ],
+      "only_if_missing": false
+    },
+    {
+      "endpoints": ["/acl/acl_ipv4"],
+      "when": { "path": "action.add.rule.igmp_src", "present": true },
+      "ensure": {
+        "action.add.rule.protocol": { "value": { "protocol_name": "igmp" } }
+      },
+      "remove": [
+        "action.add.rule.tcp_flags",
+        "action.add.rule.destinationports",
+        "action.add.rule.sourceports",
+        "action.add.rule.icmp"
+      ],
+      "only_if_missing": false
+    },
+    {
+      "endpoints": ["/acl/acl_ipv4"],
+      "when": { "path": "action.delete.rule.igmp_src", "present": true },
+      "ensure": {
+        "action.delete.rule.protocol": { "value": { "protocol_name": "igmp" } }
+      },
+      "remove": [
+        "action.delete.rule.tcp_flags",
+        "action.delete.rule.destinationports",
+        "action.delete.rule.sourceports",
+        "action.delete.rule.icmp"
+      ],
+      "only_if_missing": false
+    },
+    {
+      "endpoints": ["/acl/acl_ipv4"],
+      "when": { "path": "action.add.rule.igmp_dest", "present": true },
+      "ensure": {
+        "action.add.rule.protocol": { "value": { "protocol_name": "igmp" } }
+      },
+      "remove": [
+        "action.add.rule.tcp_flags",
+        "action.add.rule.destinationports",
+        "action.add.rule.sourceports",
+        "action.add.rule.icmp"
+      ],
+      "only_if_missing": false
+    },
+    {
+      "endpoints": ["/acl/acl_ipv4"],
+      "when": { "path": "action.delete.rule.igmp_dest", "present": true },
+      "ensure": {
+        "action.delete.rule.protocol": { "value": { "protocol_name": "igmp" } }
+      },
+      "remove": [
+        "action.delete.rule.tcp_flags",
+        "action.delete.rule.destinationports",
+        "action.delete.rule.sourceports",
+        "action.delete.rule.icmp"
+      ],
+      "only_if_missing": false
+    },
+    {
+      "endpoints": ["/acl/acl_ipv4"],
+      "when": {"path": "action.add.rule.sourceports", "present": true},
+      "ensure": {
+        "action.add.rule.protocol": { "value": { "protocol_name": "tcp" } }
+      },
+      "remove": [
+        "action.add.rule.icmp",
+        "action.add.rule.igmp_dest",
+        "action.add.rule.igmp_src"
+      ],
+      "only_if_missing": false
+    },
+    {
+      "endpoints": ["/acl/acl_ipv4"],
+      "when": {"path": "action.delete.rule.sourceports", "present": true},
+      "ensure": {
+        "action.delete.rule.protocol": { "value": { "protocol_name": "tcp" } }
+      },
+      "remove": [
+        "action.delete.rule.icmp",
+        "action.delete.rule.igmp_dest",
+        "action.delete.rule.igmp_src"
+      ],
+      "only_if_missing": false
+    },
+    {
+      "endpoints": ["/acl/acl_ipv4"],
+      "when": {"path": "action.add.rule.destinationports", "present": true},
+      "ensure": {
+        "action.add.rule.protocol": { "value": { "protocol_name": "tcp" } }
+      },
+      "remove": [
+        "action.add.rule.icmp",
+        "action.add.rule.igmp_dest",
+        "action.add.rule.igmp_src"
+      ],
+      "only_if_missing": false
+    },
+    {
+      "endpoints": ["/acl/acl_ipv4"],
+      "when": {"path": "action.delete.rule.destinationports", "present": true},
+      "ensure": {
+        "action.delete.rule.protocol": { "value": { "protocol_name": "tcp" } }
+      },
+      "remove": [
+        "action.delete.rule.icmp",
+        "action.delete.rule.igmp_dest",
+        "action.delete.rule.igmp_src"
+      ],
+      "only_if_missing": false
+    },
+    {
+      "endpoints": ["/acl/acl_ipv4"],
+      "when": {"path": "action.add.rule.tcp_flags", "present": true},
+      "ensure": {
+        "action.add.rule.protocol": { "value": { "protocol_name": "tcp" } }
+      },
+      "remove": [
+        "action.add.rule.icmp",
+        "action.add.rule.igmp_dest",
+        "action.add.rule.igmp_src"
+      ],
+      "only_if_missing": false
+    },
+    {
+      "endpoints": ["/acl/acl_ipv4"],
+      "when": {"path": "action.delete.rule.tcp_flags", "present": true},
+      "ensure": {
+        "action.delete.rule.protocol": { "value": { "protocol_name": "tcp" } }
+      },
+      "remove": [
+        "action.delete.rule.icmp",
+        "action.delete.rule.igmp_dest",
+        "action.delete.rule.igmp_src"
+      ],
+      "only_if_missing": false
     }
   ],
   "reserved_values": {

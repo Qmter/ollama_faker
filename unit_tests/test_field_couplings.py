@@ -145,6 +145,51 @@ class ApplyFieldCouplingsTests(unittest.TestCase):
         )
         self.assertEqual(result["mask"], "24")
 
+    def test_acl_icmp_replaces_protocol_object_and_removes_igmp(self):
+        couplings = parse_field_couplings({
+            "field_couplings": [
+                {
+                    "endpoints": ["/acl/acl_ipv4"],
+                    "when": {"path": "action.add.rule.icmp", "present": True},
+                    "ensure": {
+                        "action.add.rule.protocol": {
+                            "value": {"protocol_name": "icmp"},
+                        },
+                    },
+                    "remove": [
+                        "action.add.rule.igmp_src",
+                        "action.add.rule.igmp_dest",
+                    ],
+                    "only_if_missing": False,
+                },
+            ],
+        })
+        payload = {
+            "action": {
+                "add": {
+                    "acl_name": "acl1",
+                    "rule": {
+                        "protocol": {"not": True, "protocol_name": "ipv6-frag"},
+                        "icmp": {"icmp_type_value": 8},
+                        "igmp_dest": {"igmp_dest_addr": "10.0.0.1"},
+                        "igmp_src": {"igmp_src_addr": "10.0.0.2"},
+                    },
+                },
+            },
+        }
+        result = apply_field_couplings(
+            payload,
+            endpoint="/acl/acl_ipv4",
+            couplings=couplings,
+            mock_by_field={},
+        )
+        rule = result["action"]["add"]["rule"]
+        self.assertEqual(rule["protocol"], {"protocol_name": "icmp"})
+        self.assertNotIn("not", rule["protocol"])
+        self.assertNotIn("igmp_dest", rule)
+        self.assertNotIn("igmp_src", rule)
+        self.assertIn("icmp", rule)
+
 
 if __name__ == "__main__":
     unittest.main()

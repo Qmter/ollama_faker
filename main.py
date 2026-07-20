@@ -622,6 +622,27 @@ def _schema_has_composition(schema: dict) -> bool:
     return any(k in schema for k in ('oneOf', 'anyOf', 'allOf'))
 
 
+def _schema_is_mockable_scalar(schema: dict) -> bool:
+    """True для скаляров, куда можно ставить enum из mock_data.by_field.
+
+    Имена вроде ininterface встречаются и у object-обёртки, и у вложенной
+    строки — enum на object ломает JSF (поле пропадает из payload).
+    """
+    if not isinstance(schema, dict) or _schema_has_composition(schema):
+        return False
+    if any(k in schema for k in ("properties", "patternProperties", "items")):
+        return False
+    schema_type = schema.get("type")
+    if schema_type in ("object", "array"):
+        return False
+    if schema_type in ("string", "number", "integer", "boolean"):
+        return True
+    # type может отсутствовать у $ref-резолва с pattern/format
+    return any(
+        k in schema for k in ("pattern", "format", "minLength", "maxLength", "enum")
+    )
+
+
 _NUMERIC_BOUNDS = ('minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum')
 _STRING_BOUNDS = ('minLength', 'maxLength')
 _VLAN_ID_MIN = 2
@@ -2888,6 +2909,153 @@ def synchronize_vid_ifname(
 
 
 # =============================================================================
+# SCHEMA FIELD RELATIONS (start/stop order, optional vs sibling maximum)
+# =============================================================================
+_ORDER_PAIR_PREFIXES: tuple[tuple[str, str], ...] = (
+    ("start_", "stop_"),
+    ("min_", "max_"),
+)
+
+
+def _is_numeric_scalar(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _schema_numeric_maximum(schema: dict | None) -> int | float | None:
+    """maximum из схемы (включая ветки oneOf/anyOf/allOf)."""
+    if not isinstance(schema, dict):
+        return None
+    if "maximum" in schema and _is_numeric_scalar(schema["maximum"]):
+        return schema["maximum"]
+    if _schema_has_composition(schema):
+        for branch in _iter_schema_branches(schema):
+            found = _schema_numeric_maximum(branch)
+            if found is not None:
+                return found
+    return None
+
+
+def _property_is_required(schema: dict | None, prop_name: str) -> bool:
+    if not isinstance(schema, dict):
+        return False
+    if prop_name in (schema.get("required") or []):
+        return True
+    for branch in _iter_schema_branches(schema):
+        if _property_is_required(branch, prop_name):
+            return True
+    return False
+
+
+def _ordered_numeric_field_pairs(keys: set[str]) -> list[tuple[str, str]]:
+    """Пары (low, high) по префиксам start_/stop_ и min_/max_ с общим суффиксом."""
+    pairs: list[tuple[str, str]] = []
+    for low_prefix, high_prefix in _ORDER_PAIR_PREFIXES:
+        for key in keys:
+            if not key.startswith(low_prefix):
+                continue
+            suffix = key[len(low_prefix):]
+            if not suffix:
+                continue
+            high_key = f"{high_prefix}{suffix}"
+            if high_key in keys:
+                pairs.append((key, high_key))
+    return pairs
+
+
+def _normalize_ordered_pairs_inplace(obj: dict) -> None:
+    for low_key, high_key in _ordered_numeric_field_pairs(set(obj.keys())):
+        low_val = obj.get(low_key)
+        high_val = obj.get(high_key)
+        if not (_is_numeric_scalar(low_val) and _is_numeric_scalar(high_val)):
+            continue
+        if low_val <= high_val:
+            continue
+        obj[low_key], obj[high_key] = high_val, low_val
+        logger.debug(
+            "schema relations: swap %s=%s ↔ %s=%s",
+            low_key,
+            high_val,
+            high_key,
+            low_val,
+        )
+
+
+def _drop_optional_exceeded_by_sibling_inplace(
+    obj: dict,
+    schema: dict | None,
+) -> None:
+    """Удаляет optional numeric P, если сиблинг Q > maximum(P) из схемы."""
+    if not isinstance(schema, dict):
+        return
+    for prop_name in list(obj.keys()):
+        if _property_is_required(schema, prop_name):
+            continue
+        prop_schema = (
+            _property_schema_in_node(schema, prop_name)
+            if isinstance(schema, dict)
+            else None
+        )
+        maximum = _schema_numeric_maximum(prop_schema)
+        if maximum is None:
+            continue
+        value = obj.get(prop_name)
+        if not _is_numeric_scalar(value):
+            continue
+        for sib_name, sib_val in obj.items():
+            if sib_name == prop_name or not _is_numeric_scalar(sib_val):
+                continue
+            if sib_val > maximum:
+                logger.debug(
+                    "schema relations: drop %s=%s (sibling %s=%s > maximum %s)",
+                    prop_name,
+                    value,
+                    sib_name,
+                    sib_val,
+                    maximum,
+                )
+                obj.pop(prop_name, None)
+                break
+
+
+def _normalize_schema_field_relations_inplace(
+    obj,
+    schema: dict | None = None,
+) -> None:
+    if isinstance(obj, dict):
+        _normalize_ordered_pairs_inplace(obj)
+        _drop_optional_exceeded_by_sibling_inplace(obj, schema)
+        for key, value in obj.items():
+            child_schema = (
+                _property_schema_in_node(schema, key)
+                if isinstance(schema, dict)
+                else None
+            )
+            _normalize_schema_field_relations_inplace(value, child_schema)
+    elif isinstance(obj, list):
+        item_schema = None
+        if isinstance(schema, dict) and _resolve_schema_type(schema) == "array":
+            items = schema.get("items")
+            if isinstance(items, dict):
+                item_schema = items
+        for item in obj:
+            _normalize_schema_field_relations_inplace(item, item_schema)
+
+
+def normalize_schema_field_relations(
+    payload: dict,
+    schema: dict | None = None,
+) -> dict:
+    """
+    Пост-нормализация связей полей по схеме / именам:
+    - start_*/stop_*, min_*/max_* → low <= high (swap);
+    - optional numeric с maximum: удалить, если сиблинг > maximum.
+    """
+    result = copy.deepcopy(payload)
+    _normalize_schema_field_relations_inplace(result, schema)
+    return result
+
+
+# =============================================================================
 # FIELD COUPLINGS (dependencies.json → field_couplings)
 # =============================================================================
 def _path_exists_in_payload(payload: dict, path: str) -> bool:
@@ -2978,6 +3146,22 @@ def _resolve_ensure_value(
     return _PLACEHOLDER_MISSING
 
 
+def _delete_nested_path(payload: dict, path: str) -> bool:
+    """Удаляет ключ по dotted-пути. True, если что-то удалили."""
+    parts = [p for p in path.split(".") if p]
+    if not parts:
+        return False
+    current: Any = payload
+    for part in parts[:-1]:
+        if not isinstance(current, dict) or part not in current:
+            return False
+        current = current[part]
+    if not isinstance(current, dict) or parts[-1] not in current:
+        return False
+    del current[parts[-1]]
+    return True
+
+
 def parse_field_couplings(dependencies: dict) -> list[dict]:
     """Читает field_couplings из dependencies.json; битые правила пропускает."""
     raw = dependencies.get("field_couplings")
@@ -2990,9 +3174,24 @@ def parse_field_couplings(dependencies: dict) -> list[dict]:
             continue
         when = item.get("when")
         ensure = item.get("ensure")
-        if not isinstance(when, dict) or not isinstance(ensure, dict) or not ensure:
+        remove = item.get("remove")
+        if not isinstance(when, dict):
+            logger.warning("field_couplings[%d]: нужен when (object)", index)
+            continue
+        if ensure is not None and not isinstance(ensure, dict):
+            logger.warning("field_couplings[%d]: ensure должен быть object", index)
+            continue
+        if remove is not None and not isinstance(remove, list):
+            logger.warning("field_couplings[%d]: remove должен быть списком путей", index)
+            continue
+        ensure_map = dict(ensure) if isinstance(ensure, dict) else {}
+        remove_paths = [
+            p.strip() for p in (remove or [])
+            if isinstance(p, str) and p.strip()
+        ]
+        if not ensure_map and not remove_paths:
             logger.warning(
-                "field_couplings[%d]: нужны when (object) и ensure (object)",
+                "field_couplings[%d]: нужен ensure и/или remove",
                 index,
             )
             continue
@@ -3024,7 +3223,8 @@ def parse_field_couplings(dependencies: dict) -> list[dict]:
                     else {"in": list(when.get("in") or [])}
                 ),
             },
-            "ensure": dict(ensure),
+            "ensure": ensure_map,
+            "remove": remove_paths,
             "only_if_missing": bool(only_if_missing),
         })
     return parsed
@@ -3038,8 +3238,8 @@ def apply_field_couplings(
     mock_by_field: dict | None = None,
 ) -> dict:
     """
-    Дополняет payload связанными полями по field_couplings.
-    По умолчанию не перезаписывает уже заданные ensure-пути.
+    Дополняет / нормализует payload по field_couplings:
+    ensure — выставить поля; remove — убрать конфликтующие пути.
     """
     if not couplings or not isinstance(payload, dict):
         return payload
@@ -3052,6 +3252,13 @@ def apply_field_couplings(
         if not _when_coupling_matches(result, when):
             continue
         only_if_missing = rule.get("only_if_missing", True)
+        trigger = when.get("path", "?")
+        trigger_val = _get_path_value(result, trigger)
+        trigger_repr = (
+            trigger_val
+            if trigger_val is not _PLACEHOLDER_MISSING
+            else "present"
+        )
         for ensure_path, spec in (rule.get("ensure") or {}).items():
             if not isinstance(ensure_path, str) or not ensure_path.strip():
                 continue
@@ -3066,13 +3273,6 @@ def apply_field_couplings(
             if value is _PLACEHOLDER_MISSING:
                 continue
             set_nested_value(result, ensure_path, value)
-            trigger = when.get("path", "?")
-            trigger_val = _get_path_value(result, trigger)
-            trigger_repr = (
-                trigger_val
-                if trigger_val is not _PLACEHOLDER_MISSING
-                else "present"
-            )
             logger.info(
                 "field_couplings: %s=%r (when %s=%r)",
                 ensure_path,
@@ -3080,6 +3280,14 @@ def apply_field_couplings(
                 trigger,
                 trigger_repr,
             )
+        for remove_path in rule.get("remove") or []:
+            if _delete_nested_path(result, remove_path):
+                logger.info(
+                    "field_couplings: remove %s (when %s=%r)",
+                    remove_path,
+                    trigger,
+                    trigger_repr,
+                )
     return result
 
 
@@ -3519,6 +3727,74 @@ def _append_custom_lifecycle_step(
             scenario,
             step,
             teardown_priority if teardown_priority is not None else _TEARDOWN_PRIORITY_DEFAULT,
+        )
+
+
+def _same_endpoint_setup_add_payloads(
+    scenario: dict,
+    target_endpoint: str,
+) -> list[dict]:
+    """action.add dict'ы в setup-шагах того же эндпоинта, что и main_test."""
+    target = target_endpoint.rstrip("/")
+    result: list[dict] = []
+    for step in scenario.get("setup", []):
+        if not isinstance(step, dict):
+            continue
+        if str(step.get("endpoint", "")).rstrip("/") != target:
+            continue
+        payload = step.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        action = payload.get("action")
+        if not isinstance(action, dict):
+            continue
+        add_obj = action.get("add")
+        if isinstance(add_obj, dict):
+            result.append(add_obj)
+    return result
+
+
+def _mirror_delete_rule_into_same_endpoint_setup(
+    scenario: dict,
+    main_payload: dict,
+    target_endpoint: str,
+    request_schema: dict | None = None,
+) -> None:
+    """
+    Если main_test — delete с rule, копируем rule в setup action.add того же
+    эндпоинта (иначе delete не найдёт созданное правило).
+
+    Если rule в delete нет — setup из dependencies не трогаем (там уже
+    валидный add с rule по схеме).
+    """
+    main_action, action_data = _extract_main_action(main_payload)
+    if main_action != "delete" or not isinstance(action_data, dict):
+        return
+    delete_rule = action_data.get("rule")
+    if not isinstance(delete_rule, dict):
+        return
+
+    # Схема: зеркалим rule только если add его объявляет (обычно required).
+    if request_schema is not None:
+        add_rule_schema = _schema_at_path(request_schema, "action.add.rule")
+        if add_rule_schema is None:
+            logger.debug(
+                "mirror delete.rule пропущен: в схеме нет action.add.rule",
+            )
+            return
+
+    mirrored = copy.deepcopy(delete_rule)
+    updated = 0
+    for add_obj in _same_endpoint_setup_add_payloads(scenario, target_endpoint):
+        add_obj["rule"] = copy.deepcopy(mirrored)
+        # delete: rule и index взаимоисключающи — index в setup add не нужен
+        add_obj.pop("index", None)
+        updated += 1
+    if updated:
+        logger.debug(
+            "mirror delete.rule → %d setup add на %s",
+            updated,
+            target_endpoint,
         )
 
 
@@ -4450,7 +4726,7 @@ def apply_mock_data(
 ) -> dict:
     """
     Подменяет pattern → enum для mock-значений из dependencies.json.
-    by_field и by_schema имеют приоритет над enum из инвентаря интерфейсов.
+    Приоритет: by_field > by_schema > enum инвентаря интерфейсов.
     """
     if not mock_config:
         return schema
@@ -4469,40 +4745,46 @@ def apply_mock_data(
             if not is_reserved_field_value("ifname", value, reserved)
         ]
 
-    def _walk(obj: dict) -> None:
+    def _walk_children(obj: dict, visitor) -> None:
+        for keyword in ("properties", "patternProperties"):
+            for item in obj.get(keyword, {}).values():
+                if isinstance(item, dict):
+                    visitor(item)
+        if isinstance(obj.get("items"), dict):
+            visitor(obj["items"])
+        for branch in _iter_schema_branches(obj):
+            visitor(branch)
+
+    def _apply_by_schema(obj: dict) -> None:
         if not isinstance(obj, dict):
             return
-
         pattern = obj.get("pattern")
         if pattern and pattern in pattern_index:
             filtered = _filter_enum(None, pattern_index[pattern])
             if filtered:
                 obj["enum"] = filtered
-                logger.debug(
-                    f"mock_data by_schema (pattern): {filtered}"
-                )
+                logger.debug(f"mock_data by_schema (pattern): {filtered}")
+        _walk_children(obj, _apply_by_schema)
 
+    def _apply_by_field(obj: dict) -> None:
+        """Второй проход: by_field перекрывает by_schema на одноимённых полях."""
+        if not isinstance(obj, dict):
+            return
         for prop_name, prop_schema in obj.get("properties", {}).items():
             if (
                 prop_name in by_field
                 and isinstance(prop_schema, dict)
-                and not _schema_has_composition(prop_schema)
+                and _schema_is_mockable_scalar(prop_schema)
             ):
                 filtered = _filter_enum(prop_name, by_field[prop_name])
                 if filtered:
                     prop_schema["enum"] = filtered
                     logger.debug(f"mock_data by_field: {prop_name}={filtered}")
+        _walk_children(obj, _apply_by_field)
 
-        for keyword in ("properties", "patternProperties"):
-            for item in obj.get(keyword, {}).values():
-                if isinstance(item, dict):
-                    _walk(item)
-        if isinstance(obj.get("items"), dict):
-            _walk(obj["items"])
-        for branch in _iter_schema_branches(obj):
-            _walk(branch)
-
-    _walk(schema)
+    _apply_by_schema(schema)
+    if by_field:
+        _apply_by_field(schema)
     return schema
 
 
@@ -4746,6 +5028,7 @@ def build_test_scenarios(
         payload = synchronize_vid_ifname(
             record.payload, request_schema, reserved=reserved,
         )
+        payload = normalize_schema_field_relations(payload, request_schema)
         payload = apply_field_couplings(
             payload,
             endpoint=target_endpoint,
@@ -4840,6 +5123,11 @@ def build_test_scenarios(
         _apply_auto_scalar_delete_lifecycle(
             scenario, target_endpoint, main_action, payload,
             auto_scalar_delete, endpoint_rules, variables, deps,
+        )
+
+        # delete.rule → тот же rule в setup add (иначе ACL не совпадёт)
+        _mirror_delete_rule_into_same_endpoint_setup(
+            scenario, payload, target_endpoint, request_schema,
         )
 
         # =====================================================================

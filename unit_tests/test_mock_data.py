@@ -129,6 +129,69 @@ class ApplyMockDataTests(unittest.TestCase):
         values = collect_test_values(schema)
         self.assertEqual(values, ["10.0.0.5"])
 
+    def test_by_field_skips_object_wrapper_mocks_nested_leaf(self):
+        """Одинаковое имя у object-обёртки и leaf-строки (ACL in/outinterface)."""
+        mock_config = parse_mock_data_config({
+            "mock_data": {"by_field": {"outinterface": ["eth1", "eth2"]}},
+        })
+        schema = {
+            "type": "object",
+            "properties": {
+                "outinterface": {
+                    "type": "object",
+                    "properties": {
+                        "not": {"type": "boolean"},
+                        "outinterface": {"type": "string"},
+                    },
+                    "required": ["outinterface"],
+                },
+            },
+        }
+        result = apply_mock_data(schema, mock_config, {})
+        wrapper = result["properties"]["outinterface"]
+        self.assertNotIn("enum", wrapper)
+        self.assertEqual(
+            wrapper["properties"]["outinterface"]["enum"],
+            ["eth1", "eth2"],
+        )
+
+    def test_by_field_overrides_by_schema_on_same_property(self):
+        """igmp_dest_addr: by_field multicast побеждает общий IP_ADDR."""
+        ip_pattern = (
+            r"^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}"
+            r"(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])$"
+        )
+        mock_config = parse_mock_data_config({
+            "mock_data": {
+                "by_schema": {"IP_ADDR": ["10.0.0.1", "10.0.0.2"]},
+                "by_field": {"igmp_dest_addr": ["224.0.0.1", "239.1.1.1"]},
+            },
+        })
+        schema = {
+            "type": "object",
+            "properties": {
+                "igmp_dest_addr": {
+                    "type": "string",
+                    "pattern": ip_pattern,
+                },
+                "source_address": {
+                    "type": "string",
+                    "pattern": ip_pattern,
+                },
+            },
+        }
+        result = apply_mock_data(
+            schema, mock_config, {ip_pattern: ["10.0.0.1", "10.0.0.2"]},
+        )
+        self.assertEqual(
+            result["properties"]["igmp_dest_addr"]["enum"],
+            ["224.0.0.1", "239.1.1.1"],
+        )
+        self.assertEqual(
+            result["properties"]["source_address"]["enum"],
+            ["10.0.0.1", "10.0.0.2"],
+        )
+
 
 class PatternIndexTests(unittest.TestCase):
     def test_builds_index_from_openapi_component(self):
