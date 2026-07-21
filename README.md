@@ -17,11 +17,13 @@ openapi.json + dependencies.json + .env
      main.py  ──►  tests/<group>/<endpoint>_post.json
         │
         ▼
-  clear_for_tests.py (опционально, предочистка)
+  clear_for_tests.py  ← cleanup.json  (опционально, list→delete)
         │
         ▼
    run_tests.py  ──►  logs/run_*.log + таблица PASS/FAIL
 ```
+
+Опционально: GUI `deps_editor.py` для правки `dependencies.json` кнопками.
 
 ---
 
@@ -33,23 +35,27 @@ openapi.json + dependencies.json + .env
 4. [CLI: генерация (`main.py`)](#cli-генерация-mainpy)
 5. [CLI: предочистка (`clear_for_tests.py`)](#cli-предочистка-clear_for_testspy)
 6. [CLI: прогон (`run_tests.py`)](#cli-прогон-run_testspy)
-7. [Unit-тесты](#unit-тесты)
-8. [Логи](#логи)
-9. [Файл `.env`](#файл-env)
-10. [`dependencies.json` — обзор](#dependenciesjson--обзор)
-11. [Формат lifecycle-шага](#формат-lifecycle-шага)
-12. [Плейсхолдеры `{{…}}`](#плейсхолдеры-)
-13. [Порядок setup / teardown](#порядок-setup--teardown)
-14. [`field_mappings`](#field_mappings)
-15. [`interface_rules`](#interface_rules)
-16. [`endpoint_rules`](#endpoint_rules)
-17. [`mock_data`](#mock_data)
-18. [`interface_lifecycle` и `synthetic_bind_fields`](#interface_lifecycle-и-synthetic_bind_fields)
-19. [Формат сгенерированного теста](#формат-сгенерированного-теста)
-20. [Как работает генерация (pipeline)](#как-работает-генерация-pipeline)
-21. [Ollama (опционально)](#ollama-опционально)
-22. [Типичные задачи и чеклисты](#типичные-задачи-и-чеклисты)
-23. [Зависимости Python](#зависимости-python)
+7. [GUI: редактор dependencies (`deps_editor.py`)](#gui-редактор-dependencies-deps_editorpy)
+8. [Unit-тесты](#unit-тесты)
+9. [Логи](#логи)
+10. [Файл `.env`](#файл-env)
+11. [`dependencies.json` — обзор](#dependenciesjson--обзор)
+12. [Формат lifecycle-шага](#формат-lifecycle-шага)
+13. [Плейсхолдеры `{{…}}`](#плейсхолдеры-)
+14. [Порядок setup / teardown](#порядок-setup--teardown)
+15. [`field_mappings`](#field_mappings)
+16. [`interface_rules`](#interface_rules)
+17. [`endpoint_rules`](#endpoint_rules)
+18. [`mock_data`](#mock_data)
+19. [`interface_lifecycle` и `synthetic_bind_fields`](#interface_lifecycle-и-synthetic_bind_fields)
+20. [`field_couplings`](#field_couplings)
+21. [`reserved_values`](#reserved_values)
+22. [`cleanup.json`](#cleanupjson)
+23. [Формат сгенерированного теста](#формат-сгенерированного-теста)
+24. [Как работает генерация (pipeline)](#как-работает-генерация-pipeline)
+25. [Ollama (опционально)](#ollama-опционально)
+26. [Типичные задачи и чеклисты](#типичные-задачи-и-чеклисты)
+27. [Зависимости Python](#зависимости-python)
 
 ---
 
@@ -62,7 +68,7 @@ python -m venv .venv
 # Linux/macOS:
 # source .venv/bin/activate
 
-pip install jsf jsonschema requests
+pip install -r requirements.txt
 
 cp .env.example .env
 # отредактируйте .env: интерфейсы устройства, API_BASE_URL, логин/пароль
@@ -70,8 +76,8 @@ cp .env.example .env
 # 1. Сгенерировать сценарии для группы
 python main.py -d /interfaces
 
-# 2. (опционально) снести хвосты от прошлых прогонов
-python clear_for_tests.py -d /interfaces
+# 2. (опционально) снести тестовые ресурсы с устройства (list→delete)
+python clear_for_tests.py
 
 # 3. Прогнать на устройстве
 python run_tests.py -d /interfaces -v
@@ -80,7 +86,8 @@ python run_tests.py -d /interfaces -v
 python run_unit_tests.py -v
 ```
 
-`-e` и `-d` действуют одинаково во всех трёх скриптах: один эндпоинт / список или префикс пути.
+`-e` и `-d` действуют одинаково в `main.py` и `run_tests.py`: один эндпоинт / список или префикс пути.
+`clear_for_tests.py` работает по `cleanup.json` (не по `-e`/`-d` из тестов).
 
 ---
 
@@ -90,15 +97,18 @@ python run_unit_tests.py -v
 |------|------------|
 | `main.py` | Генерация пейлоадов и JSON-сценариев |
 | `run_tests.py` | Прогон сценариев на устройстве |
-| `clear_for_tests.py` | Предочистка: уникальные teardown из тестов |
+| `clear_for_tests.py` | Предочистка: list→delete по `cleanup.json` |
+| `deps_editor.py` | GUI (PyQt6) для правки `dependencies.json` |
 | `run_unit_tests.py` | Офлайн unit-тесты генератора |
 | `resolve_scheme.py` | Разрешение `$ref`, обход OpenAPI |
 | `ollama_orchestrator.py` | Опциональные описания через Ollama |
 | `log_paths.py` | Общие имена логов `logs/<prefix>_…` |
 | `test_paths.py` | Путь API → файл в `tests/` |
 | `openapi.json` | Спецификация API устройства |
-| `dependencies.json` | Lifecycle, mock-данные, правила интерфейсов |
+| `dependencies.json` | Lifecycle, mock, couplings, reserved… |
+| `cleanup.json` | Правила предочистки (list + delete) |
 | `.env` / `.env.example` | Инвентарь интерфейсов + доступ к API |
+| `requirements.txt` | Python-зависимости |
 | `tests/` | Сгенерированные сценарии (не путать с `unit_tests/`) |
 | `unit_tests/` | Unit-тесты |
 | `logs/` | Логи генерации / прогона / очистки |
@@ -112,7 +122,7 @@ python run_unit_tests.py -v
 ```bash
 # Настроить .env и dependencies.json под устройство
 python main.py -d /interfaces -c          # генерация (compact — меньше сценариев)
-python clear_for_tests.py -d /interfaces  # убрать «уже создано» с прошлого раза
+python clear_for_tests.py                 # list→delete по cleanup.json
 python run_tests.py -d /interfaces -v     # прогон
 # смотреть logs/run_*_interfaces.log → править dependencies / mock_data / .env
 python main.py -d /interfaces -c          # перегенерация после правок
@@ -170,26 +180,31 @@ python main.py --ollama                     # описания/имена чер
 
 ## CLI: предочистка (`clear_for_tests.py`)
 
-Собирает все уникальные шаги `teardown` из выбранных JSON и выполняет их **до** прогона. Нужно, когда устройство «грязное» после прошлых FAIL.
+Читает **`cleanup.json`** (не teardown из `tests/`). Для каждого правила: GET/list → фильтр объектов → POST delete с `{{item}}`.
+
+Нужно, когда устройство «грязное» после прошлых FAIL. **Не** добавляйте в cleanup удаление system profiles / ssh / telnet / usergroups — это может заблокировать доступ к роутеру. Защита: `defaults.skip` / `skip_prefix`.
 
 ```bash
-python clear_for_tests.py -d /interfaces
-python clear_for_tests.py -d /interfaces --dry-run   # только показать шаги
-python clear_for_tests.py -e /interfaces/vlan/add -v
+python clear_for_tests.py                      # все rules из cleanup.json
+python clear_for_tests.py -r interfaces_vlan   # только выбранные rules
+python clear_for_tests.py --dry-run            # list есть, delete не шлётся
+python clear_for_tests.py --dry-run-config     # только показать правила, без HTTP
+python clear_for_tests.py --config cleanup.json -v
 ```
 
 | Аргумент | Описание |
 |----------|----------|
-| `-e` / `-d` | Как в `main.py` / `run_tests.py` |
+| `--config FILE` | Файл правил (по умолчанию `cleanup.json`) |
+| `-r`, `--rule NAME …` | Выполнить только правила с этими `name` |
 | `-v` | Подробный лог |
 | `--base-url` | URL API (иначе `API_BASE_URL` из `.env`) |
-| `--tests-dir` | Каталог сценариев (по умолчанию `tests`) |
 | `--log-file` | Явный файл лога |
 | `--timeout` | Таймаут HTTP |
-| `--max-teardown-retry N` | Повторы одного шага (по умолчанию 3) |
-| `--dry-run` | Не слать HTTP, только список шагов |
+| `--max-teardown-retry N` | Повторы одного delete (по умолчанию 3) |
+| `--dry-run` | List вызывается, delete не выполняется |
+| `--dry-run-config` | Только разбор конфига, без HTTP |
 
-Шаги сортируются по эвристике приоритета (tunnel/vlan раньше VRF и т.п.).
+Порядок rules — по полю `priority` (меньше → раньше). Подробнее: [cleanup.json](#cleanupjson).
 
 ---
 
@@ -226,6 +241,27 @@ python run_tests.py --no-recover-already-exists
 
 ---
 
+## GUI: редактор dependencies (`deps_editor.py`)
+
+PyQt6-приложение: формы по всем секциям `dependencies.json`, live JSON-preview, Apply → Ctrl+S.
+
+```bash
+.venv\Scripts\python.exe deps_editor.py
+.venv\Scripts\python.exe deps_editor.py path\to\dependencies.json
+```
+
+| Возможность | Описание |
+|-------------|----------|
+| Вкладки 1–8 | field_mappings … reserved_values |
+| Применить | Записать текущее правило в память редактора |
+| Ctrl+S | Сохранить файл |
+| Вид → тема | Светлая / тёмная (Ctrl+T), сохраняется между запусками |
+| Подсказки | Tooltip на кнопках и вкладках |
+
+После правок в GUI нужна **перегенерация** сценариев: `python main.py -d …`.
+
+---
+
 ## Unit-тесты
 
 Офлайн, без устройства и без HTTP:
@@ -242,7 +278,11 @@ python run_unit_tests.py -k test_lifecycle.py
 | `test_payload_generation.py` | Покрытие значений, dedupe |
 | `test_placeholders.py` | `{{var}}`, dotted-пути |
 | `test_lifecycle.py` | Порядок setup/teardown, VID, defer bond |
-| `test_mock_data.py` | Секция `mock_data` |
+| `test_mock_data.py` | Секция `mock_data` (by_field / by_schema) |
+| `test_field_couplings.py` | `field_couplings`: when → ensure/remove |
+| `test_reserved_values.py` | `reserved_values.by_field` |
+| `test_schema_field_relations.py` | swap min/max, drop burst и т.п. |
+| `test_mirror_delete_rule.py` | delete.rule → setup add того же эндпоинта |
 | `test_inventory_env.py` | `.env`, инвентарь интерфейсов |
 | `test_dependencies.py` | field_mappings, endpoint_rules, skip_targets |
 | `test_scalar_delete.py` | Авто lifecycle scalar delete |
@@ -251,7 +291,7 @@ python run_unit_tests.py -k test_lifecycle.py
 | `test_runner_helpers.py` | Вспомогательная логика раннера |
 | `test_scenario_build.py` | Сборка JSON-сценариев |
 | `test_generation_log.py` | Имена файлов логов |
-| `test_clear_for_tests.py` | Дедуп и сортировка teardown |
+| `test_clear_for_tests.py` | Парсинг `cleanup.json`, skip, priority |
 | `test_vid_range.py` | VID_RANGE_LIST |
 | `test_ollama.py` | Ollama без сети |
 | `test_interface_schema_lifecycle.py` | Schema-driven lifecycle |
@@ -378,7 +418,9 @@ API_PASSWORD=admin
   "interface_rules": { },
   "interface_lifecycle": { },
   "synthetic_bind_fields": { },
-  "mock_data": { }
+  "mock_data": { },
+  "field_couplings": [ ],
+  "reserved_values": { }
 }
 ```
 
@@ -390,6 +432,8 @@ API_PASSWORD=admin
 | `interface_lifecycle` | Какие schema-компоненты (`IFNAME`, …) искать как «интерфейсные» поля |
 | `synthetic_bind_fields` | Для `delete`/`modify` без поля в payload — подтянуть lifecycle из `field_mappings` + `mock_data` |
 | `mock_data` | При генерации пейлоадов: фиксированные enum вместо случайных JSF-значений |
+| `field_couplings` | После генерации payload: при условии `when` — `ensure` поля и/или `remove` пути |
+| `reserved_values` | Значения, которые генератор **никогда** не подставит (`vlan1`, `vid` 603, …) |
 
 ---
 
@@ -785,7 +829,7 @@ Bond с `"setup_defer": true` создаётся **после** slave-интер
 **Правила:**
 
 - секция опциональна;
-- `mock_data` имеет **приоритет** над enum из инвентаря интерфейсов;
+- `by_field` имеет **приоритет** над `by_schema` (одинаковые имена свойств / схем не конфликтуют «в пользу схемы»);
 - значения: список или строка через запятую (`"vrf_name": "a,b"`);
 - для IP лучше `by_schema`, а не `by_field` на `ip_addr` (IPv4/IPv6 в разных ветках `oneOf`);
 - если API требует `/32` для tunnel peer — задайте это в `IP_ADDR_WITH_BIT_MASK`, а не правьте код;
@@ -828,6 +872,101 @@ Bond с `"setup_defer": true` создаётся **после** slave-интер
 ```
 
 Генератор возьмёт `acl_name` из `mock_data.by_field` и применит `field_mappings.acl_name` (setup перед delete).
+
+---
+
+## `field_couplings`
+
+Правки payload **после** генерации: при условии `when` выставить поля (`ensure`) и/или убрать конфликтующие пути (`remove`). Порядок правил в массиве = приоритет.
+
+```json
+{
+  "endpoints": ["/acl/acl_ipv4"],
+  "when": { "path": "action.add.rule.icmp", "present": true },
+  "ensure": {
+    "action.add.rule.protocol": { "value": { "protocol_name": "icmp" } }
+  },
+  "remove": [
+    "action.add.rule.tcp_flags",
+    "action.add.rule.sourceports"
+  ],
+  "only_if_missing": false
+}
+```
+
+| Поле | Описание |
+|------|----------|
+| `endpoints` | Список путей (пусто / нет = все эндпоинты) |
+| `when.path` | Dotted-путь в payload |
+| `when.present: true` | Поле есть |
+| `when.in: […]` | Значение ∈ списка (например mode `gretap`) |
+| `ensure.<path>` | `{ "value": … }`, `{ "values": […] }` или `{ "from_mock": "field" }` |
+| `remove` | Список dotted-путей удалить |
+| `only_if_missing` | Ensure только если целевого поля ещё нет |
+
+Типичный кейс: ACL icmp/igmp/ports → выставить `protocol` и убрать несовместимые поля. Зеркалите правила для `action.add.*` и `action.delete.*`.
+
+---
+
+## `reserved_values`
+
+Значения, которые генератор отфильтрует из enum / покрытия (даже если они есть в OpenAPI или `.env`).
+
+```json
+"reserved_values": {
+  "by_field": {
+    "ifname": ["vlan0", "vlan1", "vlan603", "vlan4095", "switchport1"],
+    "vid": [0, 1, 603, 4095],
+    "vlan": ["0", "1", "603", "4095"]
+  }
+}
+```
+
+Дублируйте защиту и в `cleanup.json` → `defaults.skip`, чтобы предочистка не трогала служебные объекты.
+
+---
+
+## `cleanup.json`
+
+Конфиг для `clear_for_tests.py`. Каждое правило: **list** (получить список) → **delete** (удалить каждый item).
+
+```json
+{
+  "defaults": {
+    "skip": ["vlan1", "admin", "startup", "base_config"],
+    "skip_prefix": []
+  },
+  "rules": [
+    {
+      "name": "interfaces_vlan",
+      "priority": 11,
+      "list": {
+        "endpoint": "/interfaces/list",
+        "method": "GET",
+        "items_path": "result.interfaces",
+        "item_filter": { "category": "vlan" },
+        "item_values": "ifname"
+      },
+      "delete": {
+        "endpoint": "/interfaces/vlan/delete",
+        "method": "POST",
+        "payload": { "ifname": "{{item}}" }
+      },
+      "skip": ["vlan1", "vlan603"]
+    }
+  ]
+}
+```
+
+| Поле | Описание |
+|------|----------|
+| `defaults.skip` / `skip_prefix` | Мержится во все rules |
+| `priority` | Меньше → раньше |
+| `list.items_path` | Dotted-путь к массиву в ответе |
+| `list.item_filter` | Фильтр объектов (все ключи должны совпасть) |
+| `list.item_values` | Поле элемента → значение `{{item}}` |
+| `delete.payload` | Тело с `{{item}}` |
+| `skip` | Точные имена, которые не удалять |
 
 ---
 
@@ -876,16 +1015,18 @@ openapi.json
   → discover POST endpoints (-e / -d)
   → ResolveScheme.resolve_endpoint()      # развернуть $ref
   → preprocess_schema_for_jsf()           # oneOf/const → enum, nullable
-  → apply_interface_inventory()           # pattern → enum из .env
-  → apply_mock_data()                     # by_schema / by_field → enum
+  → apply_interface_inventory()           # pattern → enum из .env (+ reserved)
+  → apply_mock_data()                     # by_schema, затем by_field (приоритетнее)
+  → apply_reserved_values_to_schema()     # выкинуть запрещённые из enum схемы
   → generate_value_coverage_payloads()    # enum, boolean, min/max, + JSF
-  → build_test_scenarios()                # setup / teardown из dependencies
-       1. prerequisite field_mappings
-       2. interface_rules (+ defer bond)
-       3. прочие field_mappings
-       4. endpoint_rules (+ auto vlandb)
-       5. auto scalar delete
-       6. сортировка setup / teardown
+  → build_test_scenarios()
+       · synchronize_vid_ifname
+       · normalize_schema_field_relations  # swap min/max, drop invalid siblings
+       · apply_field_couplings             # when → ensure / remove
+       · setup/teardown из dependencies
+         (field_mappings, interface_rules, endpoint_rules,
+          auto vlandb, mirror delete.rule → setup, scalar delete)
+       · сортировка setup / teardown
   → tests/.../*.json
 ```
 
@@ -924,7 +1065,10 @@ python main.py --ollama --ollama-features describe
 | Эндпоинт с `action` или `entry_type` | `endpoint_rules` + `bind_fields` / `lifecycle_key_field` |
 | Mapping мешает своему add | `skip_targets` |
 | Delete без поля в payload | `synthetic_bind_fields` + `mock_data` |
-| Предочистка устройства | `clear_for_tests.py -d …` |
+| icmp/ports ⇒ protocol | `field_couplings` |
+| Никогда не трогать vlan1 / vid 603 | `reserved_values` + `cleanup.json` skip |
+| Предочистка устройства | `clear_for_tests.py` + `cleanup.json` |
+| Править dependencies кнопками | `deps_editor.py` |
 | Проверить генератор без API | `run_unit_tests.py -v` |
 
 ### Чеклист: поле в payload (VRF, zone, ACL)
@@ -962,14 +1106,17 @@ python main.py --ollama --ollama-features describe
 
 ## Зависимости Python
 
+Установка:
+
+```bash
+pip install -r requirements.txt
+```
+
 | Пакет | Зачем |
 |-------|-------|
 | `jsf` | Генерация значений по JSON Schema |
-| `jsonschema` | Валидация пейлоадов |
+| `jsonschema` | Валидация пейлоадов (транзитивно через jsf и код) |
 | `requests` | HTTP в `run_tests.py`, `clear_for_tests.py`, Ollama |
+| `PyQt6` | GUI `deps_editor.py` |
 
-```bash
-pip install jsf jsonschema requests
-```
-
-Python 3.10+ (используются `list[str] | None`, `match` и т.п.).
+Python **3.10+** (аннотации `list[str] | None`, `match` и т.п.).

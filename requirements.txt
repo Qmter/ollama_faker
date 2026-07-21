@@ -1,0 +1,7 @@
+# Core (генерация + прогон + clear)
+jsf>=0.11.2,<1
+jsonschema>=4.26.0,<5
+requests>=2.32.0,<3
+
+# GUI-редактор dependencies.json (deps_editor.py)
+PyQt6>=6.6.0,<7
