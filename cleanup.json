@@ -1,0 +1,475 @@
+{
+  "defaults": {
+    "skip": [
+      "vlan1",
+      "vlan603",
+      "switchport1",
+      "default",
+      "admin",
+      "service",
+      "startup",
+      "base_config",
+      "boot"
+    ],
+    "skip_prefix": [],
+    "_comment": "Не удалять system profiles/ssh/telnet/usergroups — только тестовые ресурсы"
+  },
+  "rules": [
+    {
+      "name": "interfaces_tunnel",
+      "priority": 10,
+      "list": {
+        "endpoint": "/interfaces/list",
+        "method": "GET",
+        "items_path": "result.interfaces",
+        "item_filter": {
+          "category": "tunnel"
+        },
+        "item_values": "ifname"
+      },
+      "delete": {
+        "endpoint": "/interfaces/tunnel/delete",
+        "method": "POST",
+        "payload": {
+          "ifname": "{{item}}"
+        }
+      }
+    },
+    {
+      "name": "interfaces_vlan",
+      "priority": 11,
+      "list": {
+        "endpoint": "/interfaces/list",
+        "method": "GET",
+        "items_path": "result.interfaces",
+        "item_filter": {
+          "category": "vlan"
+        },
+        "item_values": "ifname"
+      },
+      "delete": {
+        "endpoint": "/interfaces/vlan/delete",
+        "method": "POST",
+        "payload": {
+          "ifname": "{{item}}"
+        }
+      },
+      "skip": [
+        "vlan1",
+        "vlan603"
+      ]
+    },
+    {
+      "name": "interfaces_eth_vlan",
+      "priority": 12,
+      "list": {
+        "endpoint": "/interfaces/list",
+        "method": "GET",
+        "items_path": "result.interfaces",
+        "item_filter": {
+          "category": "eth-vlan"
+        },
+        "item_values": "ifname"
+      },
+      "delete": {
+        "endpoint": "/interfaces/eth_vlan/delete",
+        "method": "POST",
+        "payload": {
+          "ifname": "{{item}}"
+        }
+      }
+    },
+    {
+      "name": "interfaces_bonding",
+      "priority": 13,
+      "list": {
+        "endpoint": "/interfaces/list",
+        "method": "GET",
+        "items_path": "result.interfaces",
+        "item_filter": {
+          "category": "bonding"
+        },
+        "item_values": "ifname"
+      },
+      "delete": {
+        "endpoint": "/interfaces/bonding/delete",
+        "method": "POST",
+        "payload": {
+          "ifname": "{{item}}"
+        }
+      }
+    },
+    {
+      "name": "interfaces_bridge",
+      "priority": 14,
+      "list": {
+        "endpoint": "/interfaces/list",
+        "method": "GET",
+        "items_path": "result.interfaces",
+        "item_filter": {
+          "category": "bridge"
+        },
+        "item_values": "ifname"
+      },
+      "delete": {
+        "endpoint": "/interfaces/bridge/delete",
+        "method": "POST",
+        "payload": {
+          "ifname": "{{item}}"
+        }
+      }
+    },
+    {
+      "name": "interfaces_loopback",
+      "priority": 15,
+      "list": {
+        "endpoint": "/interfaces/list",
+        "method": "GET",
+        "items_path": "result.interfaces",
+        "item_filter": {
+          "category": "loopback"
+        },
+        "item_values": "ifname"
+      },
+      "delete": {
+        "endpoint": "/interfaces/loopback/delete",
+        "method": "POST",
+        "payload": {
+          "ifname": "{{item}}"
+        }
+      }
+    },
+    {
+      "name": "interfaces_wlan",
+      "priority": 16,
+      "list": {
+        "endpoint": "/interfaces/list",
+        "method": "GET",
+        "items_path": "result.interfaces",
+        "item_filter": {
+          "category": "wlan"
+        },
+        "item_values": "ifname"
+      },
+      "delete": {
+        "endpoint": "/interfaces/wifi/delete",
+        "method": "POST",
+        "payload": {
+          "ifname": "{{item}}"
+        }
+      }
+    },
+    {
+      "name": "ipsla",
+      "priority": 20,
+      "list": {
+        "endpoint": "/ipsla",
+        "method": "GET",
+        "items_path": "result"
+      },
+      "delete": {
+        "endpoint": "/ipsla",
+        "method": "POST",
+        "payload": {
+          "action": {
+            "delete": "{{item}}"
+          }
+        }
+      }
+    },
+    {
+      "name": "acl_time_range",
+      "priority": 40,
+      "list": {
+        "endpoint": "/acl/time_range/list",
+        "method": "GET",
+        "items_path": "result"
+      },
+      "delete": {
+        "endpoint": "/acl/time_range/configuration",
+        "method": "POST",
+        "payload": {
+          "action": {
+            "delete": {
+              "name": "{{item}}"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "acl_ipv4",
+      "priority": 50,
+      "list": {
+        "endpoint": "/acl/list",
+        "method": "GET",
+        "query": {
+          "proto": "ipv4"
+        },
+        "items_path": "result.ipv4"
+      },
+      "delete": {
+        "endpoint": "/acl/acl_ipv4",
+        "method": "POST",
+        "payload": {
+          "action": {
+            "delete": {
+              "acl_name": "{{item}}"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "acl_ipv6",
+      "priority": 51,
+      "list": {
+        "endpoint": "/acl/list",
+        "method": "GET",
+        "query": {
+          "proto": "ipv6"
+        },
+        "items_path": "result.ipv6"
+      },
+      "delete": {
+        "endpoint": "/acl/acl_ipv6",
+        "method": "POST",
+        "payload": {
+          "action": {
+            "delete": {
+              "acl_name": "{{item}}"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "dhcp_ipv4_pools",
+      "priority": 60,
+      "list": {
+        "endpoint": "/dhcp/ipv4/pools/list",
+        "method": "GET",
+        "items_path": "result"
+      },
+      "delete": {
+        "endpoint": "/dhcp/ipv4/pools/delete",
+        "method": "POST",
+        "payload": {
+          "pool_number": "{{item}}"
+        }
+      }
+    },
+    {
+      "name": "dhcp_ipv6_pools",
+      "priority": 61,
+      "list": {
+        "endpoint": "/dhcp/ipv6/pools/list",
+        "method": "GET",
+        "items_path": "result"
+      },
+      "delete": {
+        "endpoint": "/dhcp/ipv6/pools/delete",
+        "method": "POST",
+        "payload": {
+          "pool_number": "{{item}}"
+        }
+      }
+    },
+    {
+      "name": "dhcp_client_config",
+      "priority": 62,
+      "list": {
+        "endpoint": "/dhcp/client/config/list",
+        "method": "GET",
+        "items_path": "result"
+      },
+      "delete": {
+        "endpoint": "/dhcp/client/config/delete",
+        "method": "POST",
+        "payload": {
+          "config_name": "{{item}}"
+        }
+      }
+    },
+    {
+      "name": "dhcp_ipv4_relay",
+      "priority": 63,
+      "list": {
+        "endpoint": "/dhcp/ipv4/relay/list",
+        "method": "GET",
+        "items_path": "result"
+      },
+      "delete": {
+        "endpoint": "/dhcp/ipv4/relay/delete",
+        "method": "POST",
+        "payload": {
+          "relay_name": "{{item}}"
+        }
+      }
+    },
+    {
+      "name": "dhcp_ipv6_relay",
+      "priority": 64,
+      "list": {
+        "endpoint": "/dhcp/ipv6/relay/list",
+        "method": "GET",
+        "items_path": "result"
+      },
+      "delete": {
+        "endpoint": "/dhcp/ipv6/relay/delete",
+        "method": "POST",
+        "payload": {
+          "relay_name": "{{item}}"
+        }
+      }
+    },
+    {
+      "name": "dns_proxy",
+      "priority": 70,
+      "list": {
+        "endpoint": "/dns/proxy/list",
+        "method": "GET",
+        "items_path": "result"
+      },
+      "delete": {
+        "endpoint": "/dns/proxy/delete",
+        "method": "POST",
+        "payload": {
+          "vrf_name": "{{item}}"
+        }
+      }
+    },
+    {
+      "name": "dns_zone_master",
+      "priority": 71,
+      "list": {
+        "endpoint": "/dns/server/zone/master/list",
+        "method": "GET",
+        "items_path": "result"
+      },
+      "delete": {
+        "endpoint": "/dns/server/zone/master/delete",
+        "method": "POST",
+        "payload": {
+          "zone_name": "{{item}}"
+        }
+      }
+    },
+    {
+      "name": "dns_zone_slave",
+      "priority": 72,
+      "list": {
+        "endpoint": "/dns/server/zone/slave/list",
+        "method": "GET",
+        "items_path": "result"
+      },
+      "delete": {
+        "endpoint": "/dns/server/zone/slave/delete",
+        "method": "POST",
+        "payload": {
+          "zone_name": "{{item}}"
+        }
+      }
+    },
+    {
+      "name": "fail2ban_jail",
+      "priority": 80,
+      "list": {
+        "endpoint": "/fail2ban/jail/list",
+        "method": "GET",
+        "items_path": "result"
+      },
+      "delete": {
+        "endpoint": "/fail2ban/jail/delete",
+        "method": "POST",
+        "payload": {
+          "jail_name": "{{item}}"
+        }
+      }
+    },
+    {
+      "name": "openvpn_client",
+      "priority": 85,
+      "list": {
+        "endpoint": "/openvpn/client/list",
+        "method": "GET",
+        "items_path": "result"
+      },
+      "delete": {
+        "endpoint": "/openvpn/client/delete",
+        "method": "POST",
+        "payload": {
+          "client_name": "{{item}}"
+        }
+      }
+    },
+    {
+      "name": "radius_attributes",
+      "priority": 95,
+      "list": {
+        "endpoint": "/radius/attributes/list",
+        "method": "GET",
+        "items_path": "result.attributes"
+      },
+      "delete": {
+        "endpoint": "/radius/attributes/delete",
+        "method": "POST",
+        "payload": {
+          "name": "{{item}}"
+        }
+      }
+    },
+    {
+      "name": "radius_servers",
+      "priority": 96,
+      "list": {
+        "endpoint": "/radius/servers/list",
+        "method": "GET",
+        "items_path": "result.servers"
+      },
+      "delete": {
+        "endpoint": "/radius/servers/delete",
+        "method": "POST",
+        "payload": {
+          "ip_address": "{{item}}"
+        }
+      }
+    },
+    {
+      "name": "tacacs_servers",
+      "priority": 105,
+      "list": {
+        "endpoint": "/tacacs/servers/list",
+        "method": "GET",
+        "items_path": "result.servers"
+      },
+      "delete": {
+        "endpoint": "/tacacs/servers/delete",
+        "method": "POST",
+        "payload": {
+          "address": "{{item}}"
+        }
+      }
+    },
+    {
+      "name": "vrf",
+      "priority": 120,
+      "list": {
+        "endpoint": "/vrf",
+        "method": "GET",
+        "items_path": "result"
+      },
+      "delete": {
+        "endpoint": "/vrf",
+        "method": "POST",
+        "payload": {
+          "action": "delete",
+          "vrf_name": "{{item}}"
+        }
+      },
+      "skip": [
+        "default"
+      ]
+    }
+  ]
+}
