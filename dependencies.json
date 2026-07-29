@@ -1,1278 +1,1753 @@
 {
-  "field_mappings": {
-    "time_range": {
-      "setup": {
-        "endpoint": "/acl/time_range/configuration",
-        "method": "POST",
-        "payload": {
-          "action": {
-            "add": {
-              "name": "{{time_range}}",
-              "configuration": {}
-            }
-          }
-        },
-        "extract_to_variable": "created_time_range",
-        "response_extract": "data.name"
-      },
-      "teardown": {
-        "endpoint": "/acl/time_range/configuration",
-        "method": "POST",
-        "payload": {
-          "action": {
-            "delete": {
-              "name": "{{time_range}}"
-            }
-          }
-        }
-      }
-    },
-    "track_value": {
-      "setup": {
-        "endpoint": "/ipsla",
-        "method": "POST",
-        "payload": {
-          "action": {
-            "add": {
-              "tracker_name": "{{track_value}}",
-              "type": "logical"
-            }
-          }
-        }
-      },
-      "teardown": {
-        "endpoint": "/ipsla",
-        "method": "POST",
-        "payload": {
-          "action": {
-            "delete": "{{track_value}}"
-          }
-        }
-      }
-    },
-    "zone_name": {
-      "requirements": ["setup", "teardown"],
-      "skip_targets": [
-        "/dns/server/zone/master/add",
-        "/dns/server/zone/slave/*"
-      ],
-      "setup": {
-        "endpoint": "/dns/server/zone/master/add",
-        "method": "POST",
-        "payload": {
-          "zone_name": "{{zone_name}}"
-        },
-        "extract_to_variable": "created_zone_name",
-        "response_extract": "data.zone_name"
-      },
-      "teardown": {
-        "endpoint": "/dns/server/zone/master/delete",
-        "method": "POST",
-        "payload": {
-          "zone_name": "{{zone_name}}"
-        }
-      }
-    },
-    "jail_name": {
-      "requirements": ["setup", "teardown"],
-      "setup": [
-        {
-          "endpoint": "/fail2ban/jail/add",
-          "method": "POST",
-          "payload": {
-            "jail_name": "{{jail_name}}"
-          },
-          "extract_to_variable": "created_jail_name",
-          "response_extract": "data.jail_name"
-        }
-      ],
-      "teardown": [
-        {
-          "endpoint": "/fail2ban/jail/delete",
-          "method": "POST",
-          "payload": {
-            "jail_name": "{{created_jail_name}}"
-          }
-        }
-      ]
-    },
-    "primary_interface": {
-      "optional": true,
-      "setup": [
-        {
-        "endpoint": "/interfaces/bonding/capability",
-        "method": "POST",
-        "payload": {
-          "ifname": "{{ifname}}",
-          "capability": {
-            "enslave": ["{{primary_interface}}"]
-          }
-        },
-        "note": "Enslave primary interface before setting bond mode"
-        }
-      ],
-      "teardown": 
-      {
-        "endpoint": "/interfaces/bonding/capability",
-        "method": "POST",
-        "payload": {
-          "ifname": "{{ifname}}",
-          "capability": {
-            "enslave": []
-          }
-        },
-        "note": "Enslave primary interface before setting bond mode"
-        }
-    },
-    "pool_number": {
-      "setup": {
-        "endpoint": "/dhcp/ipv4/pools/add",
-        "method": "POST",
-        "payload": {
-          "pool_number": "{{pool_number}}",
-          "network": "1.1.1.0/24"
-        },
-        "extract_to_variable": "created_pool",
-        "response_extract": "data.pool_number"
-      },
-      "teardown": {
-        "endpoint": "/dhcp/ipv4/pools/delete",
-        "method": "POST",
-        "payload": {
-          "pool_number": "{{created_pool}}"
-        }
-      }
-    },
-    "vrf_name": {
-      "teardown_priority": 100,
-      "setup": {
-        "endpoint": "/vrf",
-        "method": "POST",
-        "payload": {
-          "action": "add",
-          "vrf_name": "{{vrf_name}}"
-        },
-        "extract_to_variable": "created_vrf_name",
-        "response_extract": "data.vrf_name"
-      },
-      "teardown": {
-        "endpoint": "/vrf",
-        "method": "POST",
-        "payload": {
-          "action": "delete",
-          "vrf_name": "{{vrf_name}}"
-        },
-        "note": "Cleanup created vrf_name"
-      },
-      "optional": true
-    },
-    "vrf": {
-      "teardown_priority": 100,
-      "setup": {
-        "endpoint": "/vrf",
-        "method": "POST",
-        "payload": {
-          "action": "add",
-          "vrf_name": "{{vrf}}"
-        },
-        "extract_to_variable": "created_vrf",
-        "response_extract": "data.vrf"
-      },
-      "teardown": {
-        "endpoint": "/vrf",
-        "method": "POST",
-        "payload": {
-          "action": "delete",
-          "vrf_name": "{{vrf}}"
-        },
-        "note": "Cleanup created vrf"
-      },
-      "optional": true
-    },
-    "access_list": {
-      "requirements": ["setup", "teardown"],
-      "setup": {
-        "endpoint": "/acl/acl_ipv4",
-        "method": "POST",
-        "payload": {
-            "action": {
-              "add": {
-                "acl_name": "{{access_list}}",
-                "rule": {
-                  "dpi": {
-                    "dpi_protocol": "sina(weibo)"
-                  }
-                }
-              }
-            }
-        },
-        "extract_to_variable": "created_acl_name",
-        "response_extract": "data.access_list"
-      },
-      "teardown": {
-        "endpoint": "/acl/acl_ipv4",
-        "method": "POST",
-        "payload": {
-          "action": {
-            "delete": {
-              "acl_name": "{{access_list}}"
-            }
-          }
-        },
-        "note": "Cleanup created access_list"
-      },
-      "optional": true
-    },
-    "acl_name": {
-      "setup": {
-        "endpoint": "/acl/acl_ipv4",
-        "method": "POST",
-        "payload": {
-            "action": {
-              "add": {
-                "acl_name": "{{acl_name}}",
-                "rule": {
-                  "dpi": {
-                    "dpi_protocol": "sina(weibo)"
-                  }
-                }
-              }
-            }
-        },
-        "extract_to_variable": "created_acl_name",
-        "response_extract": "data.acl_name"
-      },
-      "teardown": {
-        "endpoint": "/acl/acl_ipv4",
-        "method": "POST",
-        "payload": {
-          "action": {
-            "delete": {
-              "acl_name": "{{acl_name}}"
-            }
-          }
-        },
-        "note": "Cleanup created acl_name"
-      },
-      "optional": true
-    }
-  },
-  "endpoint_rules": {
-    "/ssh/client": {
-      "bind_fields": ["key_name"],
-      "setup": {
-        "endpoint": "/ssh/client/key",
-        "method": "POST",
-        "payload": {
-          "key_type": "rsa",
-          "modulus": 1024,
-          "key_name": "{{key_name}}"
-        }
-      },
-      "teardown": {
-        "endpoint": "/ssh/client/key/delete",
-        "method": "POST",
-        "payload": {
-          "key_name": "{{key_name}}"
-        }
-      }
-    },
-    "/telnet": {
-      "bind_fields": ["vrf_name"],
-      "setup": {
-        "endpoint": "/telnet/add",
-        "method": "POST",
-        "payload": {
-          "vrf_name": "{{vrf_name}}"
-        },
-        "note": "Telnet instance before config endpoints (/telnet/*)"
-      },
-      "teardown": {
-        "endpoint": "/telnet/delete",
-        "method": "POST",
-        "payload": {
-          "vrf_name": "{{vrf_name}}"
-        }
-      }
-    },
-    "/datetime/dst": {
-      "bind_fields": ["time", "date", "timezone"],
-      "add": {
-        "teardown": {
-          "endpoint": "/datetime/dst",
-          "method": "POST",
-          "payload": {
-            "action": {
-              "delete": {
-                "time": "{{time}}",
-                "date": "{{date}}"
-              }
-            }
-          },
-          "note": "Cleanup DST after add test"
-        }
-      },
-      "delete": {
-        "setup": {
-          "endpoint": "/datetime/dst",
-          "method": "POST",
-          "payload": {
-            "action": {
-              "add": {
-                "time": "{{time}}",
-                "timezone": "{{timezone}}",
-                "date": "{{date}}"
-              }
-            }
-          },
-          "note": "Create DST before delete test"
-        },
-        "teardown": {
-          "endpoint": "/datetime/dst",
-          "method": "POST",
-          "payload": {
-            "action": {
-              "delete": {
-                "time": "{{time}}",
-                "date": "{{date}}"
-              }
-            }
-          },
-          "note": "Cleanup DST after delete test"
-        }
-      }
-    },
-    "dns/server/serial": {
-      "teardown": {
-        "endpoint": "/dns/server/serial",
-        "method": "POST",
-        "payload": {
-          "serial": "system-time"
-        }
-      }
-    },
-    "/dns/server/zone/master/add": {
-      "bind_fields": ["zone_name"],
-      "teardown": {
-        "endpoint": "/dns/server/zone/master/delete",
-        "method": "POST",
-        "payload": {
-          "zone_name": "{{zone_name}}"
-        },
-        "note": "Cleanup master zone after add test"
-      }
-    },
-    "/dns/server/zone/slave/add": {
-      "bind_fields": ["zone_name", "master_ip"],
-      "teardown": {
-        "endpoint": "/dns/server/zone/slave/delete",
-        "method": "POST",
-        "payload": {
-          "zone_name": "{{zone_name}}"
-        },
-        "note": "Cleanup slave zone after add test"
-      }
-    },
-    "/dns/server/zone/slave/delete": {
-      "bind_fields": ["zone_name", "master_ip"],
-      "setup": {
-        "endpoint": "/dns/server/zone/slave/add",
-        "method": "POST",
-        "payload": {
-          "zone_name": "{{zone_name}}",
-          "master_ip": "{{master_ip}}"
-        },
-        "expected_status": 200,
-        "note": "Create slave zone before delete test"
-      }
-    },
-    "/dns/server/zone/master/entry/add": {
-      "bind_fields": ["zone_name", "entry_name", "entry_type"],
-      "teardown_priority": 55,
-      "teardown": {
-        "endpoint": "/dns/server/zone/master/entry/delete",
-        "method": "POST",
-        "payload": {
-          "zone_name": "{{zone_name}}",
-          "entry_name": "{{entry_name}}",
-          "entry_type": "{{entry_type}}"
-        },
-        "note": "Cleanup DNS entry after add test"
-      }
-    },
-    "/dns/server/zone/master/entry/delete": {
-      "lifecycle_key_field": "entry_type",
-      "bind_fields": ["zone_name", "entry_name", "entry_type", "ip_address", "priority"],
-      "a": {
-        "setup": {
-          "endpoint": "/dns/server/zone/master/entry/add",
-          "method": "POST",
-          "payload": {
-            "zone_name": "{{zone_name}}",
-            "entry": {
-              "entry_name": "{{entry_name}}",
-              "entry_params": {
-                "entry_type": "a",
-                "ip_address": "{{ip_address}}"
-              }
-            }
-          },
-          "expected_status": 200,
-          "note": "Create A record before delete test"
-        }
-      },
-      "aaaa": {
-        "setup": {
-          "endpoint": "/dns/server/zone/master/entry/add",
-          "method": "POST",
-          "payload": {
-            "zone_name": "{{zone_name}}",
-            "entry": {
-              "entry_name": "{{entry_name}}",
-              "entry_params": {
-                "entry_type": "aaaa",
-                "ip_address": "2001:db8::1"
-              }
-            }
-          },
-          "expected_status": 200,
-          "note": "Create AAAA record before delete test"
-        }
-      },
-      "mx": {
-        "setup": {
-          "endpoint": "/dns/server/zone/master/entry/add",
-          "method": "POST",
-          "payload": {
-            "zone_name": "{{zone_name}}",
-            "entry": {
-              "entry_name": "{{entry_name}}",
-              "entry_params": {
-                "entry_type": "mx",
-                "priority": "{{priority}}"
-              }
-            }
-          },
-          "expected_status": 200,
-          "note": "Create MX record before delete test"
-        }
-      },
-      "ns": {
-        "setup": {
-          "endpoint": "/dns/server/zone/master/entry/add",
-          "method": "POST",
-          "payload": {
-            "zone_name": "{{zone_name}}",
-            "entry": {
-              "entry_name": "{{entry_name}}",
-              "entry_params": {
-                "entry_type": "ns"
-              }
-            }
-          },
-          "expected_status": 200,
-          "note": "Create NS record before delete test"
-        }
-      }
-    },
-    "/dns/server": {
-      "bind_fields": ["vrf_name"],
-      "teardown": [
-      {
-        "endpoint": "/dns/server",
-        "method": "POST",
-        "payload": {
-          "allow_query": "any",
-          "allow_transfer": "any",
-          "listen_addresses": "any",
-          "listen_port": 53,
-          "recursion": false
-          }
-      },
-      {
-        "endpoint": "/dns/server/control",
-        "method": "POST",
-        "payload": {
-          "action": "off"
-        }
-      }
-    ]
-    },
-    "/dns/proxy": {
-      "bind_fields": ["vrf_name"],
-      "teardown": {
-        "endpoint": "/dns/proxy/delete",
-        "method": "POST",
-        "payload": {
-          "vrf_name": "{{vrf_name}}"
-        },
-        "note": "Cleanup DNS proxy after control test"
-      }
-    },
-    "/dns/proxy/delete": {
-      "bind_fields": ["vrf_name", "option_authoritative", "option_recursive"],
-      "setup": {
-        "endpoint": "/dns/proxy",
-        "method": "POST",
-        "payload": {
-          "vrf_name": "{{vrf_name}}",
-          "option_authoritative": "{{option_authoritative}}",
-          "option_recursive": "{{option_recursive}}"
-        }
-      }
-    },
-    "/dns/proxy/control": {
-      "bind_fields": ["vrf_name", "option_authoritative", "option_recursive"],
-      "setup": {
-        "endpoint": "/dns/proxy",
-        "method": "POST",
-        "payload": {
-          "vrf_name": "{{vrf_name}}",
-          "option_authoritative": "{{option_authoritative}}",
-          "option_recursive": "{{option_recursive}}"
-        },
-        "note": "Create DNS proxy before control test"
-      },
-      "teardown": {
-        "endpoint": "/dns/proxy/delete",
-        "method": "POST",
-        "payload": {
-          "vrf_name": "{{vrf_name}}"
-        },
-        "note": "Cleanup DNS proxy after control test"
-      }
-    },
-    "/dns/client": {
-      "bind_fields": ["ip_addr"],
-      "add first": {
-        "teardown": {
-          "endpoint": "/dns/client",
-          "method": "POST",
-          "payload": {
-            "action": "delete",
-            "ip_addr": "{{ip_addr}}"
-          },
-          "note": "Cleanup DNS client after add first test"
-        }
-      },
-      "add last": {
-        "teardown": {
-          "endpoint": "/dns/client",
-          "method": "POST",
-          "payload": {
-            "action": "delete",
-            "ip_addr": "{{ip_addr}}"
-          },
-          "note": "Cleanup DNS client after add last test"
-        }
-      },
-      "delete": {
-        "setup": {
-          "endpoint": "/dns/client",
-          "method": "POST",
-          "payload": {
-            "action": "add first",
-            "ip_addr": "{{ip_addr}}"
-          },
-          "note": "Create DNS client before delete test"
-        }
-      }
-    },
-    "/fail2ban/unban": {
-      "requirements": ["setup", "teardown"],
-      "setup": {
-        "endpoint": "/fail2ban/enable",
-        "method": "POST",
-        "payload": {
-          "action": "start"
-        }
-      },
-      "teardown": {
-        "endpoint": "/fail2ban/enable",
-        "method": "POST",
-        "payload": {
-          "action": "stop"
-        }
-      }
-    },
-    "/interfaces/common/noipv6_address": {
-      "bind_fields": ["ifname", "ipv6_addr"],
-      "setup": {
-        "endpoint": "/interfaces/common/ipv6_address",
-        "method": "POST",
-        "payload": {
-          "ifname": "{{ifname}}",
-          "ipv6_addr": "{{ipv6_addr}}"
-        }
-      },
-      "teardown": {
-        "endpoint": "/interfaces/common/noipv6_address",
-        "method": "POST",
-        "payload": {
-          "ifname": "{{ifname}}",
-          "ipv6_addr": "{{ipv6_addr}}"
-        },
-        "note": "Cleanup created ip_address"
-      }
-    },
-    "/interfaces/common/noip_address": {
-      "bind_fields": ["ifname", "ip_addr"],
-      "setup": {
-        "endpoint": "/interfaces/common/ip_address",
-        "method": "POST",
-        "payload": {
-          "ifname": "{{ifname}}",
-          "ip_addr": "{{ip_addr}}"
-        }
-      },
-      "teardown": {
-        "endpoint": "/interfaces/common/noip_address",
-        "method": "POST",
-        "payload": {
-          "ifname": "{{ifname}}",
-          "ip_addr": "{{ip_addr}}"
-        },
-        "note": "Cleanup created ip_address"
-      }
-    },
-    "/interfaces/switchport/mac_address_table_static": {
-      "bind_fields": ["mac_addr", "ifnames", "vlan"],
-      "add": {
-        "teardown": {
-          "endpoint": "/interfaces/switchport/mac_address_table_static",
-          "method": "POST",
-          "payload": {
-            "ifnames": "{{ifnames}}",
-            "action": {
-              "delete": {
-                "mac_addr": "{{mac_addr}}",
-                "vlan": "{{vlan}}"
-              }
-            }
-          }
-        }
-      },
-      "delete": {
-        "setup": {
-          "endpoint": "/interfaces/switchport/mac_address_table_static",
-          "method": "POST",
-          "payload": {
-            "ifnames": "{{ifnames}}",
-            "action": {
-              "add": {
-                "mac_addr": "{{mac_addr}}",
-                "vlan": "{{vlan}}"
-              }
-            }
-          },
-          "note": "Создать запись перед delete-тестом"
-        }
-      }
-    },
-    "/interfaces/switchport/vlandb": {
-      "bind_fields": ["vlan"],
-      "add": {
-        "teardown": {
-          "endpoint": "/interfaces/switchport/vlandb",
-          "method": "POST",
-          "payload": {
-            "action": "delete",
-            "vlan": "{{vlan}}"
-          }
-        }
-      },
-      "delete": {
-        "setup": {
-          "endpoint": "/interfaces/switchport/vlandb",
-          "method": "POST",
-          "payload": {
-            "action": "add",
-            "vlan": "{{vlan}}"
-          }
-        }
-    }
-  },
-    "/acl/filter/filter_ipv4": {
-      "bind_fields": ["vrf", "chain", "acl_name"],
-      "add": {
-        "teardown": {
-          "endpoint": "/acl/filter/filter_ipv4",
-          "method": "POST",
-          "payload": {
-            "action": {
-              "delete": {
-                "vrf": "{{vrf}}",
-                "chain": "{{chain}}",
-                "acl_name": "{{acl_name}}"
-              }
-            }
-          },
-          "note": "Cleanup filter after add test"
-        }
-      },
-      "delete": {
-        "setup": [
-          {
-          "endpoint": "/acl/filter/filter_ipv4",
-          "method": "POST",
-          "payload": {
-            "action": {
-              "add": {
-                "vrf": "{{vrf}}",
-                "chain": "{{chain}}",
-                "filter": {
-                  "acl_name": "{{acl_name}}",
-                  "action": "permit"
-                }
-              }
-            }
-          },
-          "note": "Create filter before delete test"
-        }
-      ]
-      },
-      "modify": {
-        "setup": [
-          {
-            "endpoint": "/acl/filter/filter_ipv4",
-            "method": "POST",
-            "payload": {
-              "action": {
-                "add": {
-                  "vrf": "{{vrf}}",
-                  "chain": "{{chain}}",
-                  "filter": {
-                    "acl_name": "{{acl_name}}",
-                    "action": "permit"
-                  }
-                }
-              }
-            },
-            "note": "Create filter before modify test"
-          }
-        ],
-        "teardown": [
-          {
-            "endpoint": "/acl/filter/filter_ipv4",
-            "method": "POST",
-            "payload": {
-              "action": {
-                "delete": {
-                  "vrf": "{{vrf}}",
-                  "chain": "{{chain}}"
-                }
-              }
-            },
-            "note": "Cleanup filter after modify test"
-          }
-        ]
-      }
-    }
-  },
-  "interface_rules": {
-    "ifname": {
-      "rules": [
-        {
-          "pattern": "^([0-9]|[1-5][0-9]|6[0-3])([\\-]([0-9]|[1-5][0-9]|6[0-3]))?([\\,]([0-9]|[1-5][0-9]|6[0-3])([\\-]([0-9]|[1-5][0-9]|6[0-3]))?)*$",
-          "env": "DSCP_LIST"
-        },
-        {
-          "pattern": "^([0-7])([\\-]([0-7]))?([\\,]([0-7])([\\-]([0-7]))?)*$",
-          "env": "FPRI_LIST"
-        },
-        {
-          "pattern": "^([1-9][0-9]{0,3}([\\-][1-9][0-9]{0,3})?)([\\,][1-9][0-9]{0,3}([\\-][1-9][0-9]{0,3})?)*$",
-          "env": "VID_RANGE"
-        },
-        {
-          "pattern": "^((eth(0|[1-9][0-9]{0,3})\\.(0|[1-9][0-9]{0,3}))|(vlan([0-9]|[1-9][0-9]{1,2}|[1-3][0-9]{3}|40[0-8][0-9]|409[0-5]))|([A-Za-uw-z][A-Za-z0-9_\\-]{0,30}[A-Za-z](0|[1-9][0-9]{0,3})))$",
-          "env": "DEVICE_IFNAMES"
-        },
-        
-        {
-          "pattern": "^eth(0|[1-9][0-9]{0,3})([\\.](0|[1-9][0-9]{0,3}))$",
-          "env": "DEVICE_ETH_VLAN_IFNAMES",
-          "bind_fields": ["ifname", "ip_addr"],
-          "teardown_priority": 11,
-          "setup": 
-          [
-          {
-            "endpoint": "/interfaces/eth_vlan/add",
-            "method": "POST",
-            "payload": {
-              "ifname": "{{ifname}}",
-              "vid": "{{vid}}"
-            },
-            "extract_to_variable": "created_ifname_eth_vlan",
-            "response_extract": "data.ifname"
-          },
-          {
-            "endpoint": "/interfaces/common/ip_address",
-            "method": "POST",
-            "payload": {
-              "ifname": "{{ifname}}",
-              "ip_addr": "{{ip_addr}}"
-            }
-          },
-          {
-            "endpoint": "/interfaces/shutdown",
-            "method": "POST",
-            "payload": {
-              "ifname": "{{ifname}}",
-              "adm_state": true
-            }
-          }
-          ],
-          "teardown": [
-            {
-            "endpoint": "/interfaces/eth_vlan/delete",
-            "method": "POST",
-            "payload": {
-              "ifname": "{{ifname}}"
-            },
-            "note": "Cleanup created ifname_eth_vlan"
-          }
-          ]
-        },
-        {
-          "pattern": "^eth(0|[1-9][0-9]{0,3})$",
-          "env": "DEVICE_ETH_IFNAMES",
-          "setup": {
-            "endpoint": "/interfaces/shutdown",
-            "method": "POST",
-            "payload": {
-              "ifname": "{{ifname}}",
-              "adm_state": true
-            },
-            "note": "Reset physical ethernet to defaults"
-          },
-          "teardown": [{
-            "endpoint": "/interfaces/common/reset_interface",
-            "method": "POST",
-            "payload": {
-              "ifname": "{{ifname}}"
-            },
-            "note": "Reset physical ethernet to defaults"
-          }
-        ]
-        },
-        {
-          "pattern": "^switchport[1-8]$",
-          "env": "DEVICE_SWITCHPORT_IFNAMES",
-          "requirements": ["setup", "teardown"],
-          "setup":
-            {
-              "endpoint": "/interfaces/switchport/storm_control_counters",
-              "method": "POST",
-              "payload": {
-                "ifname": "{{ifname}}",
-                "unknown_multicast": {
-                  "action": "start",
-                  "rates": {
-                    "min_rate": 306,
-                    "max_rate": "unlimited"
-                  }
+    "field_mappings": {
+        "time_range": {
+            "setup": {
+                "endpoint": "/acl/time_range/configuration",
+                "method": "POST",
+                "payload": {
+                    "action": {
+                        "add": {
+                            "name": "{{time_range}}",
+                            "configuration": {}
+                        }
+                    }
                 },
-                "unknown_broadcast": {
-                  "action": "start",
-                  "rates": {
-                    "min_rate": 306,
-                    "max_rate": "unlimited"
-                  }
-                },
-                "known_broadcast_multicast": {
-                  "action": "start",
-                  "rates": {
-                    "min_rate": 306,
-                    "max_rate": "unlimited"
-                  }
-                },
-                "arp": {
-                  "action": "start",
-                  "rates": {
-                    "min_rate": 306,
-                    "max_rate": "unlimited"
-                  }
+                "extract_to_variable": "created_time_range",
+                "response_extract": "data.name"
+            },
+            "teardown": {
+                "endpoint": "/acl/time_range/configuration",
+                "method": "POST",
+                "payload": {
+                    "action": {
+                        "delete": {
+                            "name": "{{time_range}}"
+                        }
+                    }
                 }
-              }
-              },
-          "teardown": [
-            {
-              "endpoint": "/interfaces/switchport/storm_control_counters",
-              "method": "POST",
-              "payload": {
-                "ifname": "{{ifname}}",
-                "unknown_multicast": {
-                  "action": "stop"
-                },
-                "unknown_broadcast": {
-                  "action": "stop"
-                },
-                "known_broadcast_multicast": {
-                  "action": "stop"
-                },
-                "arp": {
-                  "action": "stop"
+            }
+        },
+        "track_value": {
+            "setup": {
+                "endpoint": "/ipsla",
+                "method": "POST",
+                "payload": {
+                    "action": {
+                        "add": {
+                            "tracker_name": "{{track_value}}",
+                            "type": "logical"
+                        }
+                    }
                 }
-              }
-              },
-            {
-            "endpoint": "/interfaces/switchport/capability",
-            "method": "POST",
-            "payload": {
-              "port": [
+            },
+            "teardown": {
+                "endpoint": "/ipsla",
+                "method": "POST",
+                "payload": {
+                    "action": {
+                        "delete": "{{track_value}}"
+                    }
+                }
+            }
+        },
+        "zone_name": {
+            "requirements": [
+                "setup",
+                "teardown"
+            ],
+            "skip_targets": [
+                "/dns/server/zone/master/add",
+                "/dns/server/zone/slave/*"
+            ],
+            "setup": {
+                "endpoint": "/dns/server/zone/master/add",
+                "method": "POST",
+                "payload": {
+                    "zone_name": "{{zone_name}}"
+                },
+                "extract_to_variable": "created_zone_name",
+                "response_extract": "data.zone_name"
+            },
+            "teardown": {
+                "endpoint": "/dns/server/zone/master/delete",
+                "method": "POST",
+                "payload": {
+                    "zone_name": "{{zone_name}}"
+                }
+            }
+        },
+        "jail_name": {
+            "requirements": [
+                "setup",
+                "teardown"
+            ],
+            "setup": [
                 {
-                  "ifname": "{{ifname}}",
-                  "autonegotiation": {
-                    "on": true
-                  },
-                  "mtu": 10240,
-                  "igmp_snooping": false,
-                  "port_security": false,
-                  "mac_address_table_learn_limit": null
+                    "endpoint": "/fail2ban/jail/add",
+                    "method": "POST",
+                    "payload": {
+                        "jail_name": "{{jail_name}}"
+                    },
+                    "extract_to_variable": "created_jail_name",
+                    "response_extract": "data.jail_name"
                 }
-              ],
-              "cpu": {
-                "mac_address_table_learn_limit": null
-              },
-              "mac_address_table_aging_time": null,
-              "dhcp_snooping": {
-                "mode": false
-              },
-              "voicevlan": null,
-              "igmp_snooping": false
-            },
-            "note": "Reset switchport capability to defaults"
-          },
-          {
-            "endpoint": "/interfaces/switchport/mode",
-            "method": "POST",
-            "payload": {
-              "ifname": "{{ifname}}",
-              "settings": {
-                "mode": "access",
-                "vlan": "untagged"
-              }
-            },
-            "note": "Reset switchport mode to defaults"
-          }
-      ]},
-        {
-          "prefix": "bond",
-          "setup_defer": true,
-          "teardown_priority": 10,
-          "create": "/interfaces/bonding/add",
-          "delete": "/interfaces/bonding/delete"
+            ],
+            "teardown": [
+                {
+                    "endpoint": "/fail2ban/jail/delete",
+                    "method": "POST",
+                    "payload": {
+                        "jail_name": "{{created_jail_name}}"
+                    }
+                }
+            ]
         },
-        {
-          "prefix": "lo",
-          "teardown_priority": 10,
-          "create": "/interfaces/loopback/add",
-          "delete": "/interfaces/loopback/delete"
-        },
-        {
-          "prefix": "br",
-          "teardown_priority": 10,
-          "create": "/interfaces/bridge/add",
-          "delete": "/interfaces/bridge/delete"
-        },
-        {
-          "prefix": "vlan",
-          "teardown_priority": 11,
-          "env": "DEVICE_VLAN_IFNAMES",
-          "setup": {
-            "endpoint": "/interfaces/vlan/add",
-            "method": "POST",
-            "payload": {
-              "ifname": "{{ifname}}",
-              "vid": "{{vid}}"
-            },
-            "extract_to_variable": "created_ifname_vlan",
-            "response_extract": "data.ifname"
-          },
-          "teardown": [
-            {
-            "endpoint": "/interfaces/vlan/delete",
-            "method": "POST",
-            "payload": {
-              "ifname": "{{ifname}}"
+        "primary_interface": {
+            "optional": true,
+            "setup": [
+                {
+                    "endpoint": "/interfaces/bonding/capability",
+                    "method": "POST",
+                    "payload": {
+                        "ifname": "{{ifname}}",
+                        "capability": {
+                            "enslave": [
+                                "{{primary_interface}}"
+                            ]
+                        }
+                    },
+                    "note": "Enslave primary interface before setting bond mode"
+                }
+            ],
+            "teardown": {
+                "endpoint": "/interfaces/bonding/capability",
+                "method": "POST",
+                "payload": {
+                    "ifname": "{{ifname}}",
+                    "capability": {
+                        "enslave": []
+                    }
+                },
+                "note": "Enslave primary interface before setting bond mode"
             }
-          }
-          ]
+        },
+        "pool_number": {
+            "setup": {
+                "endpoint": "/dhcp/ipv4/pools/add",
+                "method": "POST",
+                "payload": {
+                    "pool_number": "{{pool_number}}",
+                    "network": "1.1.1.0/24"
+                },
+                "extract_to_variable": "created_pool",
+                "response_extract": "data.pool_number"
+            },
+            "teardown": {
+                "endpoint": "/dhcp/ipv4/pools/delete",
+                "method": "POST",
+                "payload": {
+                    "pool_number": "{{created_pool}}"
+                }
+            }
+        },
+        "vrf_name": {
+            "teardown_priority": 100,
+            "setup": {
+                "endpoint": "/vrf",
+                "method": "POST",
+                "payload": {
+                    "action": "add",
+                    "vrf_name": "{{vrf_name}}"
+                },
+                "extract_to_variable": "created_vrf_name",
+                "response_extract": "data.vrf_name"
+            },
+            "teardown": {
+                "endpoint": "/vrf",
+                "method": "POST",
+                "payload": {
+                    "action": "delete",
+                    "vrf_name": "{{vrf_name}}"
+                },
+                "note": "Cleanup created vrf_name"
+            },
+            "optional": true
+        },
+        "vrf": {
+            "teardown_priority": 100,
+            "setup": {
+                "endpoint": "/vrf",
+                "method": "POST",
+                "payload": {
+                    "action": "add",
+                    "vrf_name": "{{vrf}}"
+                },
+                "extract_to_variable": "created_vrf",
+                "response_extract": "data.vrf"
+            },
+            "teardown": {
+                "endpoint": "/vrf",
+                "method": "POST",
+                "payload": {
+                    "action": "delete",
+                    "vrf_name": "{{vrf}}"
+                },
+                "note": "Cleanup created vrf"
+            },
+            "optional": true
+        },
+        "access_list": {
+            "requirements": [
+                "setup",
+                "teardown"
+            ],
+            "setup": {
+                "endpoint": "/acl/acl_ipv4",
+                "method": "POST",
+                "payload": {
+                    "action": {
+                        "add": {
+                            "acl_name": "{{access_list}}",
+                            "rule": {
+                                "dpi": {
+                                    "dpi_protocol": "sina(weibo)"
+                                }
+                            }
+                        }
+                    }
+                },
+                "extract_to_variable": "created_acl_name",
+                "response_extract": "data.access_list"
+            },
+            "teardown": {
+                "endpoint": "/acl/acl_ipv4",
+                "method": "POST",
+                "payload": {
+                    "action": {
+                        "delete": {
+                            "acl_name": "{{access_list}}"
+                        }
+                    }
+                },
+                "note": "Cleanup created access_list"
+            },
+            "optional": true
+        },
+        "acl_name": {
+            "setup": {
+                "endpoint": "/acl/acl_ipv4",
+                "method": "POST",
+                "payload": {
+                    "action": {
+                        "add": {
+                            "acl_name": "{{acl_name}}",
+                            "rule": {
+                                "dpi": {
+                                    "dpi_protocol": "sina(weibo)"
+                                }
+                            }
+                        }
+                    }
+                },
+                "extract_to_variable": "created_acl_name",
+                "response_extract": "data.acl_name"
+            },
+            "teardown": {
+                "endpoint": "/acl/acl_ipv4",
+                "method": "POST",
+                "payload": {
+                    "action": {
+                        "delete": {
+                            "acl_name": "{{acl_name}}"
+                        }
+                    }
+                },
+                "note": "Cleanup created acl_name"
+            },
+            "optional": true
+        }
+    },
+    "endpoint_rules": {
+        "/ssh/client": {
+            "bind_fields": [
+                "key_name"
+            ],
+            "setup": {
+                "endpoint": "/ssh/client/key",
+                "method": "POST",
+                "payload": {
+                    "key_type": "rsa",
+                    "modulus": 1024,
+                    "key_name": "{{key_name}}"
+                }
+            },
+            "teardown": {
+                "endpoint": "/ssh/client/key/delete",
+                "method": "POST",
+                "payload": {
+                    "key_name": "{{key_name}}"
+                }
+            }
+        },
+        "/telnet": {
+            "bind_fields": [
+                "vrf_name"
+            ],
+            "setup": {
+                "endpoint": "/telnet/add",
+                "method": "POST",
+                "payload": {
+                    "vrf_name": "{{vrf_name}}"
+                },
+                "note": "Telnet instance before config endpoints (/telnet/*)"
+            },
+            "teardown": {
+                "endpoint": "/telnet/delete",
+                "method": "POST",
+                "payload": {
+                    "vrf_name": "{{vrf_name}}"
+                }
+            }
+        },
+        "/datetime/dst": {
+            "bind_fields": [
+                "time",
+                "date",
+                "timezone"
+            ],
+            "add": {
+                "teardown": {
+                    "endpoint": "/datetime/dst",
+                    "method": "POST",
+                    "payload": {
+                        "action": {
+                            "delete": {
+                                "time": "{{time}}",
+                                "date": "{{date}}"
+                            }
+                        }
+                    },
+                    "note": "Cleanup DST after add test"
+                }
+            },
+            "delete": {
+                "setup": {
+                    "endpoint": "/datetime/dst",
+                    "method": "POST",
+                    "payload": {
+                        "action": {
+                            "add": {
+                                "time": "{{time}}",
+                                "timezone": "{{timezone}}",
+                                "date": "{{date}}"
+                            }
+                        }
+                    },
+                    "note": "Create DST before delete test"
+                },
+                "teardown": {
+                    "endpoint": "/datetime/dst",
+                    "method": "POST",
+                    "payload": {
+                        "action": {
+                            "delete": {
+                                "time": "{{time}}",
+                                "date": "{{date}}"
+                            }
+                        }
+                    },
+                    "note": "Cleanup DST after delete test"
+                }
+            }
+        },
+        "dns/server/serial": {
+            "teardown": {
+                "endpoint": "/dns/server/serial",
+                "method": "POST",
+                "payload": {
+                    "serial": "system-time"
+                }
+            }
+        },
+        "/dns/server/zone/master/add": {
+            "bind_fields": [
+                "zone_name"
+            ],
+            "teardown": {
+                "endpoint": "/dns/server/zone/master/delete",
+                "method": "POST",
+                "payload": {
+                    "zone_name": "{{zone_name}}"
+                },
+                "note": "Cleanup master zone after add test"
+            }
+        },
+        "/dns/server/zone/slave/add": {
+            "bind_fields": [
+                "zone_name",
+                "master_ip"
+            ],
+            "teardown": {
+                "endpoint": "/dns/server/zone/slave/delete",
+                "method": "POST",
+                "payload": {
+                    "zone_name": "{{zone_name}}"
+                },
+                "note": "Cleanup slave zone after add test"
+            }
+        },
+        "/dns/server/zone/slave/delete": {
+            "bind_fields": [
+                "zone_name",
+                "master_ip"
+            ],
+            "setup": {
+                "endpoint": "/dns/server/zone/slave/add",
+                "method": "POST",
+                "payload": {
+                    "zone_name": "{{zone_name}}",
+                    "master_ip": "{{master_ip}}"
+                },
+                "expected_status": 200,
+                "note": "Create slave zone before delete test"
+            }
+        },
+        "/dns/server/zone/master/entry/add": {
+            "bind_fields": [
+                "zone_name",
+                "entry_name",
+                "entry_type"
+            ],
+            "teardown_priority": 55,
+            "teardown": {
+                "endpoint": "/dns/server/zone/master/entry/delete",
+                "method": "POST",
+                "payload": {
+                    "zone_name": "{{zone_name}}",
+                    "entry_name": "{{entry_name}}",
+                    "entry_type": "{{entry_type}}"
+                },
+                "note": "Cleanup DNS entry after add test"
+            }
+        },
+        "/dns/server/zone/master/entry/delete": {
+            "lifecycle_key_field": "entry_type",
+            "bind_fields": [
+                "zone_name",
+                "entry_name",
+                "entry_type",
+                "ip_address",
+                "priority"
+            ],
+            "a": {
+                "setup": {
+                    "endpoint": "/dns/server/zone/master/entry/add",
+                    "method": "POST",
+                    "payload": {
+                        "zone_name": "{{zone_name}}",
+                        "entry": {
+                            "entry_name": "{{entry_name}}",
+                            "entry_params": {
+                                "entry_type": "a",
+                                "ip_address": "{{ip_address}}"
+                            }
+                        }
+                    },
+                    "expected_status": 200,
+                    "note": "Create A record before delete test"
+                }
+            },
+            "aaaa": {
+                "setup": {
+                    "endpoint": "/dns/server/zone/master/entry/add",
+                    "method": "POST",
+                    "payload": {
+                        "zone_name": "{{zone_name}}",
+                        "entry": {
+                            "entry_name": "{{entry_name}}",
+                            "entry_params": {
+                                "entry_type": "aaaa",
+                                "ip_address": "2001:db8::1"
+                            }
+                        }
+                    },
+                    "expected_status": 200,
+                    "note": "Create AAAA record before delete test"
+                }
+            },
+            "mx": {
+                "setup": {
+                    "endpoint": "/dns/server/zone/master/entry/add",
+                    "method": "POST",
+                    "payload": {
+                        "zone_name": "{{zone_name}}",
+                        "entry": {
+                            "entry_name": "{{entry_name}}",
+                            "entry_params": {
+                                "entry_type": "mx",
+                                "priority": "{{priority}}"
+                            }
+                        }
+                    },
+                    "expected_status": 200,
+                    "note": "Create MX record before delete test"
+                }
+            },
+            "ns": {
+                "setup": {
+                    "endpoint": "/dns/server/zone/master/entry/add",
+                    "method": "POST",
+                    "payload": {
+                        "zone_name": "{{zone_name}}",
+                        "entry": {
+                            "entry_name": "{{entry_name}}",
+                            "entry_params": {
+                                "entry_type": "ns"
+                            }
+                        }
+                    },
+                    "expected_status": 200,
+                    "note": "Create NS record before delete test"
+                }
+            }
+        },
+        "/dns/server": {
+            "bind_fields": [
+                "vrf_name"
+            ],
+            "teardown": [
+                {
+                    "endpoint": "/dns/server",
+                    "method": "POST",
+                    "payload": {
+                        "allow_query": "any",
+                        "allow_transfer": "any",
+                        "listen_addresses": "any",
+                        "listen_port": 53,
+                        "recursion": false
+                    }
+                },
+                {
+                    "endpoint": "/dns/server/control",
+                    "method": "POST",
+                    "payload": {
+                        "action": "off"
+                    }
+                }
+            ]
+        },
+        "/dns/proxy": {
+            "bind_fields": [
+                "vrf_name"
+            ],
+            "teardown": {
+                "endpoint": "/dns/proxy/delete",
+                "method": "POST",
+                "payload": {
+                    "vrf_name": "{{vrf_name}}"
+                },
+                "note": "Cleanup DNS proxy after control test"
+            }
+        },
+        "/dns/proxy/delete": {
+            "bind_fields": [
+                "vrf_name",
+                "option_authoritative",
+                "option_recursive"
+            ],
+            "setup": {
+                "endpoint": "/dns/proxy",
+                "method": "POST",
+                "payload": {
+                    "vrf_name": "{{vrf_name}}",
+                    "option_authoritative": "{{option_authoritative}}",
+                    "option_recursive": "{{option_recursive}}"
+                }
+            }
+        },
+        "/dns/proxy/control": {
+            "bind_fields": [
+                "vrf_name",
+                "option_authoritative",
+                "option_recursive"
+            ],
+            "setup": {
+                "endpoint": "/dns/proxy",
+                "method": "POST",
+                "payload": {
+                    "vrf_name": "{{vrf_name}}",
+                    "option_authoritative": "{{option_authoritative}}",
+                    "option_recursive": "{{option_recursive}}"
+                },
+                "note": "Create DNS proxy before control test"
+            },
+            "teardown": {
+                "endpoint": "/dns/proxy/delete",
+                "method": "POST",
+                "payload": {
+                    "vrf_name": "{{vrf_name}}"
+                },
+                "note": "Cleanup DNS proxy after control test"
+            }
+        },
+        "/dns/client": {
+            "bind_fields": [
+                "ip_addr"
+            ],
+            "add first": {
+                "teardown": {
+                    "endpoint": "/dns/client",
+                    "method": "POST",
+                    "payload": {
+                        "action": "delete",
+                        "ip_addr": "{{ip_addr}}"
+                    },
+                    "note": "Cleanup DNS client after add first test"
+                }
+            },
+            "add last": {
+                "teardown": {
+                    "endpoint": "/dns/client",
+                    "method": "POST",
+                    "payload": {
+                        "action": "delete",
+                        "ip_addr": "{{ip_addr}}"
+                    },
+                    "note": "Cleanup DNS client after add last test"
+                }
+            },
+            "delete": {
+                "setup": {
+                    "endpoint": "/dns/client",
+                    "method": "POST",
+                    "payload": {
+                        "action": "add first",
+                        "ip_addr": "{{ip_addr}}"
+                    },
+                    "note": "Create DNS client before delete test"
+                }
+            }
+        },
+        "/fail2ban/unban": {
+            "requirements": [
+                "setup",
+                "teardown"
+            ],
+            "setup": {
+                "endpoint": "/fail2ban/enable",
+                "method": "POST",
+                "payload": {
+                    "action": "start"
+                }
+            },
+            "teardown": {
+                "endpoint": "/fail2ban/enable",
+                "method": "POST",
+                "payload": {
+                    "action": "stop"
+                }
+            }
+        },
+        "/interfaces/common/noipv6_address": {
+            "bind_fields": [
+                "ifname",
+                "ipv6_addr"
+            ],
+            "setup": {
+                "endpoint": "/interfaces/common/ipv6_address",
+                "method": "POST",
+                "payload": {
+                    "ifname": "{{ifname}}",
+                    "ipv6_addr": "{{ipv6_addr}}"
+                }
+            },
+            "teardown": {
+                "endpoint": "/interfaces/common/noipv6_address",
+                "method": "POST",
+                "payload": {
+                    "ifname": "{{ifname}}",
+                    "ipv6_addr": "{{ipv6_addr}}"
+                },
+                "note": "Cleanup created ip_address"
+            }
+        },
+        "/interfaces/common/noip_address": {
+            "bind_fields": [
+                "ifname",
+                "ip_addr"
+            ],
+            "setup": {
+                "endpoint": "/interfaces/common/ip_address",
+                "method": "POST",
+                "payload": {
+                    "ifname": "{{ifname}}",
+                    "ip_addr": "{{ip_addr}}"
+                }
+            },
+            "teardown": {
+                "endpoint": "/interfaces/common/noip_address",
+                "method": "POST",
+                "payload": {
+                    "ifname": "{{ifname}}",
+                    "ip_addr": "{{ip_addr}}"
+                },
+                "note": "Cleanup created ip_address"
+            }
+        },
+        "/interfaces/switchport/mac_address_table_static": {
+            "bind_fields": [
+                "mac_addr",
+                "ifnames",
+                "vlan"
+            ],
+            "add": {
+                "teardown": {
+                    "endpoint": "/interfaces/switchport/mac_address_table_static",
+                    "method": "POST",
+                    "payload": {
+                        "ifnames": "{{ifnames}}",
+                        "action": {
+                            "delete": {
+                                "mac_addr": "{{mac_addr}}",
+                                "vlan": "{{vlan}}"
+                            }
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "setup": {
+                    "endpoint": "/interfaces/switchport/mac_address_table_static",
+                    "method": "POST",
+                    "payload": {
+                        "ifnames": "{{ifnames}}",
+                        "action": {
+                            "add": {
+                                "mac_addr": "{{mac_addr}}",
+                                "vlan": "{{vlan}}"
+                            }
+                        }
+                    },
+                    "note": "Создать запись перед delete-тестом"
+                }
+            }
+        },
+        "/interfaces/switchport/vlandb": {
+            "bind_fields": [
+                "vlan"
+            ],
+            "add": {
+                "teardown": {
+                    "endpoint": "/interfaces/switchport/vlandb",
+                    "method": "POST",
+                    "payload": {
+                        "action": "delete",
+                        "vlan": "{{vlan}}"
+                    }
+                }
+            },
+            "delete": {
+                "setup": {
+                    "endpoint": "/interfaces/switchport/vlandb",
+                    "method": "POST",
+                    "payload": {
+                        "action": "add",
+                        "vlan": "{{vlan}}"
+                    }
+                }
+            }
+        },
+        "/acl/time_range/configuration": {
+            "bind_fields": [
+                "name"
+            ],
+            "requirements": [
+                "setup",
+                "teardown"
+            ],
+            "add": {
+                "teardown": {
+                    "endpoint": "/acl/time_range/configuration",
+                    "method": "POST",
+                    "payload": {
+                        "action": {
+                            "delete": {
+                                "name": "{{name}}"
+                            }
+                        }
+                    },
+                    "note": "Delete time_range after add/modify test"
+                }
+            },
+            "delete": {
+                "setup": {
+                    "endpoint": "/acl/time_range/configuration",
+                    "method": "POST",
+                    "payload": {
+                        "action": {
+                            "add": {
+                                "name": "{{name}}",
+                                "configuration": {}
+                            }
+                        }
+                    },
+                    "note": "Add time_range before delete/modify test"
+                }
+            },
+            "modify": {
+                "setup": [
+                    {
+                        "endpoint": "/acl/time_range/configuration",
+                        "method": "POST",
+                        "payload": {
+                            "action": {
+                                "add": {
+                                    "name": "{{name}}",
+                                    "configuration": {}
+                                }
+                            }
+                        },
+                        "note": "Add time_range before modify test"
+                    }
+                ],
+                "teardown": [
+                    {
+                        "endpoint": "/acl/time_range/configuration",
+                        "method": "POST",
+                        "payload": {
+                            "action": {
+                                "delete": {
+                                    "name": "{{name}}"
+                                }
+                            }
+                        },
+                        "note": "Delete time_range after modify test"
+                    }
+                ]
+            }
+        },
+        "/acl/mangle/mangle_ipv4": {
+            "bind_fields": [
+                "vrf",
+                "chain",
+                "acl_name"
+            ],
+            "add": {
+                "teardown": {
+                    "endpoint": "/acl/mangle/mangle_ipv4",
+                    "method": "POST",
+                    "payload": {
+                        "action": {
+                            "delete": {
+                                "vrf": "{{vrf}}",
+                                "chain": "{{chain}}",
+                                "acl_name": "{{acl_name}}"
+                            }
+                        }
+                    },
+                    "note": "Delete ACL Mangle after add test"
+                }
+            },
+            "delete": {
+                "setup": {
+                    "endpoint": "/acl/mangle/mangle_ipv4",
+                    "method": "POST",
+                    "payload": {
+                        "action": {
+                            "add": {
+                                "vrf": "{{vrf}}",
+                                "chain": "{{chain}}",
+                                "mangle": {
+                                    "acl_name": "{{acl_name}}",
+                                    "action": "permit"
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "modify": {
+                "setup": {
+                    "endpoint": "/acl/mangle/mangle_ipv4",
+                    "method": "POST",
+                    "payload": {
+                        "action": {
+                            "add": {
+                                "vrf": "{{vrf}}",
+                                "chain": "{{chain}}",
+                                "mangle": {
+                                    "acl_name": "{{acl_name}}",
+                                    "action": "permit"
+                                }
+                            }
+                        }
+                    },
+                    "note": "Add ACL mangle before modify test"
+                },
+                "teardown": {
+                    "endpoint": "/acl/mangle/mangle_ipv4",
+                    "method": "POST",
+                    "payload": {
+                        "action": {
+                            "delete": {
+                                "vrf": "{{vrf}}",
+                                "chain": "{{chain}}"
+                            }
+                        }
+                    },
+                    "note": "Cleanup ACL mangle after modify test"
+                }
+            }
+        },
+        "/acl/nat/chains": {
+            "bind_fields": [
+                "vrf",
+                "chain",
+                "acl_name",
+                "ip"
+            ],
+            "add": {
+                "teardown": {
+                    "endpoint": "/acl/nat/chains",
+                    "method": "POST",
+                    "payload": {
+                        "action": {
+                            "delete": {
+                                "chain": "{{chain}}",
+                                "acl_name": "{{acl_name}}"
+                            }
+                        }
+                    },
+                    "note": "Delete ACL NAT after add test"
+                }
+            },
+            "delete": {
+                "setup": {
+                    "endpoint": "/acl/nat/chains",
+                    "method": "POST",
+                    "payload": {
+                        "action": {
+                            "add": {
+                                "chain": "{{chain}}",
+                                "item": {
+                                    "acl_name": "{{acl_name}}",
+                                    "ip": "{{ip}}"
+                                },
+                                "vrf": "{{vrf}}"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/acl/filter/filter_ipv4": {
+            "bind_fields": [
+                "vrf",
+                "chain",
+                "acl_name"
+            ],
+            "add": {
+                "teardown": {
+                    "endpoint": "/acl/filter/filter_ipv4",
+                    "method": "POST",
+                    "payload": {
+                        "action": {
+                            "delete": {
+                                "vrf": "{{vrf}}",
+                                "chain": "{{chain}}",
+                                "acl_name": "{{acl_name}}"
+                            }
+                        }
+                    },
+                    "note": "Cleanup filter after add test"
+                }
+            },
+            "delete": {
+                "setup": [
+                    {
+                        "endpoint": "/acl/filter/filter_ipv4",
+                        "method": "POST",
+                        "payload": {
+                            "action": {
+                                "add": {
+                                    "vrf": "{{vrf}}",
+                                    "chain": "{{chain}}",
+                                    "filter": {
+                                        "acl_name": "{{acl_name}}",
+                                        "action": "permit"
+                                    }
+                                }
+                            }
+                        },
+                        "note": "Create filter before delete test"
+                    }
+                ]
+            },
+            "modify": {
+                "setup": [
+                    {
+                        "endpoint": "/acl/filter/filter_ipv4",
+                        "method": "POST",
+                        "payload": {
+                            "action": {
+                                "add": {
+                                    "vrf": "{{vrf}}",
+                                    "chain": "{{chain}}",
+                                    "filter": {
+                                        "acl_name": "{{acl_name}}",
+                                        "action": "permit"
+                                    }
+                                }
+                            }
+                        },
+                        "note": "Create filter before modify test"
+                    }
+                ],
+                "teardown": [
+                    {
+                        "endpoint": "/acl/filter/filter_ipv4",
+                        "method": "POST",
+                        "payload": {
+                            "action": {
+                                "delete": {
+                                    "vrf": "{{vrf}}",
+                                    "chain": "{{chain}}"
+                                }
+                            }
+                        },
+                        "note": "Cleanup filter after modify test"
+                    }
+                ]
+            }
+        }
+    },
+    "interface_rules": {
+        "ifname": {
+            "rules": [
+                {
+                    "pattern": "^([0-9]|[1-5][0-9]|6[0-3])([\\-]([0-9]|[1-5][0-9]|6[0-3]))?([\\,]([0-9]|[1-5][0-9]|6[0-3])([\\-]([0-9]|[1-5][0-9]|6[0-3]))?)*$",
+                    "env": "DSCP_LIST"
+                },
+                {
+                    "pattern": "^([0-7])([\\-]([0-7]))?([\\,]([0-7])([\\-]([0-7]))?)*$",
+                    "env": "FPRI_LIST"
+                },
+                {
+                    "pattern": "^([1-9][0-9]{0,3}([\\-][1-9][0-9]{0,3})?)([\\,][1-9][0-9]{0,3}([\\-][1-9][0-9]{0,3})?)*$",
+                    "env": "VID_RANGE"
+                },
+                {
+                    "pattern": "^((eth(0|[1-9][0-9]{0,3})\\.(0|[1-9][0-9]{0,3}))|(vlan([0-9]|[1-9][0-9]{1,2}|[1-3][0-9]{3}|40[0-8][0-9]|409[0-5]))|([A-Za-uw-z][A-Za-z0-9_\\-]{0,30}[A-Za-z](0|[1-9][0-9]{0,3})))$",
+                    "env": "DEVICE_IFNAMES"
+                },
+                {
+                    "pattern": "^eth(0|[1-9][0-9]{0,3})([\\.](0|[1-9][0-9]{0,3}))$",
+                    "env": "DEVICE_ETH_VLAN_IFNAMES",
+                    "bind_fields": [
+                        "ifname",
+                        "ip_addr"
+                    ],
+                    "teardown_priority": 11,
+                    "setup": [
+                        {
+                            "endpoint": "/interfaces/eth_vlan/add",
+                            "method": "POST",
+                            "payload": {
+                                "ifname": "{{ifname}}",
+                                "vid": "{{vid}}"
+                            },
+                            "extract_to_variable": "created_ifname_eth_vlan",
+                            "response_extract": "data.ifname"
+                        },
+                        {
+                            "endpoint": "/interfaces/common/ip_address",
+                            "method": "POST",
+                            "payload": {
+                                "ifname": "{{ifname}}",
+                                "ip_addr": "{{ip_addr}}"
+                            }
+                        },
+                        {
+                            "endpoint": "/interfaces/shutdown",
+                            "method": "POST",
+                            "payload": {
+                                "ifname": "{{ifname}}",
+                                "adm_state": true
+                            }
+                        }
+                    ],
+                    "teardown": [
+                        {
+                            "endpoint": "/interfaces/eth_vlan/delete",
+                            "method": "POST",
+                            "payload": {
+                                "ifname": "{{ifname}}"
+                            },
+                            "note": "Cleanup created ifname_eth_vlan"
+                        }
+                    ]
+                },
+                {
+                    "pattern": "^eth(0|[1-9][0-9]{0,3})$",
+                    "env": "DEVICE_ETH_IFNAMES",
+                    "setup": {
+                        "endpoint": "/interfaces/shutdown",
+                        "method": "POST",
+                        "payload": {
+                            "ifname": "{{ifname}}",
+                            "adm_state": true
+                        },
+                        "note": "Reset physical ethernet to defaults"
+                    },
+                    "teardown": [
+                        {
+                            "endpoint": "/interfaces/common/reset_interface",
+                            "method": "POST",
+                            "payload": {
+                                "ifname": "{{ifname}}"
+                            },
+                            "note": "Reset physical ethernet to defaults"
+                        }
+                    ]
+                },
+                {
+                    "pattern": "^switchport[1-8]$",
+                    "env": "DEVICE_SWITCHPORT_IFNAMES",
+                    "requirements": [
+                        "setup",
+                        "teardown"
+                    ],
+                    "setup": {
+                        "endpoint": "/interfaces/switchport/storm_control_counters",
+                        "method": "POST",
+                        "payload": {
+                            "ifname": "{{ifname}}",
+                            "unknown_multicast": {
+                                "action": "start",
+                                "rates": {
+                                    "min_rate": 306,
+                                    "max_rate": "unlimited"
+                                }
+                            },
+                            "unknown_broadcast": {
+                                "action": "start",
+                                "rates": {
+                                    "min_rate": 306,
+                                    "max_rate": "unlimited"
+                                }
+                            },
+                            "known_broadcast_multicast": {
+                                "action": "start",
+                                "rates": {
+                                    "min_rate": 306,
+                                    "max_rate": "unlimited"
+                                }
+                            },
+                            "arp": {
+                                "action": "start",
+                                "rates": {
+                                    "min_rate": 306,
+                                    "max_rate": "unlimited"
+                                }
+                            }
+                        }
+                    },
+                    "teardown": [
+                        {
+                            "endpoint": "/interfaces/switchport/storm_control_counters",
+                            "method": "POST",
+                            "payload": {
+                                "ifname": "{{ifname}}",
+                                "unknown_multicast": {
+                                    "action": "stop"
+                                },
+                                "unknown_broadcast": {
+                                    "action": "stop"
+                                },
+                                "known_broadcast_multicast": {
+                                    "action": "stop"
+                                },
+                                "arp": {
+                                    "action": "stop"
+                                }
+                            }
+                        },
+                        {
+                            "endpoint": "/interfaces/switchport/capability",
+                            "method": "POST",
+                            "payload": {
+                                "port": [
+                                    {
+                                        "ifname": "{{ifname}}",
+                                        "autonegotiation": {
+                                            "on": true
+                                        },
+                                        "mtu": 10240,
+                                        "igmp_snooping": false,
+                                        "port_security": false,
+                                        "mac_address_table_learn_limit": null
+                                    }
+                                ],
+                                "cpu": {
+                                    "mac_address_table_learn_limit": null
+                                },
+                                "mac_address_table_aging_time": null,
+                                "dhcp_snooping": {
+                                    "mode": false
+                                },
+                                "voicevlan": null,
+                                "igmp_snooping": false
+                            },
+                            "note": "Reset switchport capability to defaults"
+                        },
+                        {
+                            "endpoint": "/interfaces/switchport/mode",
+                            "method": "POST",
+                            "payload": {
+                                "ifname": "{{ifname}}",
+                                "settings": {
+                                    "mode": "access",
+                                    "vlan": "untagged"
+                                }
+                            },
+                            "note": "Reset switchport mode to defaults"
+                        }
+                    ]
+                },
+                {
+                    "prefix": "bond",
+                    "setup_defer": true,
+                    "teardown_priority": 10,
+                    "create": "/interfaces/bonding/add",
+                    "delete": "/interfaces/bonding/delete"
+                },
+                {
+                    "prefix": "lo",
+                    "teardown_priority": 10,
+                    "create": "/interfaces/loopback/add",
+                    "delete": "/interfaces/loopback/delete"
+                },
+                {
+                    "prefix": "br",
+                    "teardown_priority": 10,
+                    "create": "/interfaces/bridge/add",
+                    "delete": "/interfaces/bridge/delete"
+                },
+                {
+                    "prefix": "vlan",
+                    "teardown_priority": 11,
+                    "env": "DEVICE_VLAN_IFNAMES",
+                    "setup": {
+                        "endpoint": "/interfaces/vlan/add",
+                        "method": "POST",
+                        "payload": {
+                            "ifname": "{{ifname}}",
+                            "vid": "{{vid}}"
+                        },
+                        "extract_to_variable": "created_ifname_vlan",
+                        "response_extract": "data.ifname"
+                    },
+                    "teardown": [
+                        {
+                            "endpoint": "/interfaces/vlan/delete",
+                            "method": "POST",
+                            "payload": {
+                                "ifname": "{{ifname}}"
+                            }
+                        }
+                    ]
+                },
+                {
+                    "prefix": "tunnel",
+                    "teardown_priority": 10,
+                    "setup": {
+                        "endpoint": "/interfaces/tunnel/add",
+                        "method": "POST",
+                        "payload": {
+                            "ifname": "{{ifname}}",
+                            "settings": {
+                                "source": "1.1.1.1",
+                                "dst_address": "10.0.0.2"
+                            }
+                        },
+                        "extract_to_variable": "created_ifname_tunnel",
+                        "response_extract": "data.ifname"
+                    },
+                    "teardown": [
+                        {
+                            "endpoint": "/interfaces/tunnel/delete",
+                            "method": "POST",
+                            "payload": {
+                                "ifname": "{{ifname}}"
+                            },
+                            "note": "Cleanup created ifname_tunnel"
+                        }
+                    ]
+                }
+            ]
+        }
+    },
+    "interface_lifecycle": {
+        "schema_components": [
+            "IFNAME",
+            "interfaces_ethernet_ifname",
+            "interfaces_eth_vlan_ifname",
+            "interfaces_vlan_ifname"
+        ],
+        "rules_key": "ifname",
+        "exclude_fields": [
+            "jail_name"
+        ]
+    },
+    "synthetic_bind_fields": {
+        "/datetime/dst": [
+            "time",
+            "timezone",
+            "date"
+        ],
+        "/acl/filter/filter_ipv4": [
+            "acl_name"
+        ],
+        "/acl/mangle/mangle_ipv4": [
+            "acl_name"
+        ],
+        "/acl/nat/chains": [
+            "acl_name",
+            "ip"
+        ],
+        "/acl/time_range/configuration": [
+            "time_range"
+        ]
+    },
+    "mock_data": {
+        "by_schema": {
+            "FILTER_PORT_LISTING": [
+                "6:17"
+            ],
+            "IP_ADDR": [
+                "10.0.0.1",
+                "10.0.0.2",
+                "10.0.0.3"
+            ],
+            "IP_ADDR_WITH_BIT_MASK": [
+                "10.0.0.1/24",
+                "10.0.0.2/24",
+                "10.0.0.3/24"
+            ],
+            "IPV6_ADDR": [
+                "2001:db8::1",
+                "2001:db8::2"
+            ],
+            "IPV6_ADDR_WITH_BIT_MASK": [
+                "2001:db8:1::1/64",
+                "2001:db8:2::1/64"
+            ]
+        },
+        "by_field": {
+            "ip": [
+                "10.0.0.1"
+            ],
+            "time_range": [
+                "time_range1"
+            ],
+            "key_name": [
+                "key1",
+                "key2"
+            ],
+            "date": [
+                "23.12.2025"
+            ],
+            "ininterface": [
+                "eth1",
+                "eth2"
+            ],
+            "outinterface": [
+                "eth1",
+                "eth2"
+            ],
+            "time": [
+                "12:00"
+            ],
+            "timezone": [
+                "Europe/Moscow"
+            ],
+            "description": [
+                "",
+                "autotest-desc"
+            ],
+            "zone_name": [
+                "zone1",
+                "zone2"
+            ],
+            "master_ip": [
+                "10.0.0.1",
+                "10.0.0.2"
+            ],
+            "ip_address": [
+                "10.0.0.1"
+            ],
+            "ip_addr": [
+                "10.0.0.10/24",
+                "10.0.0.20/24"
+            ],
+            "dst_address": [
+                "10.0.0.2",
+                "10.0.0.3"
+            ],
+            "priority": [
+                0
+            ],
+            "option_authoritative": [
+                "10.0.0.1"
+            ],
+            "option_recursive": [
+                "10.0.0.1"
+            ],
+            "jail_name": [
+                "jail1",
+                "jail2"
+            ],
+            "vrf_name": [
+                "vrf1",
+                "vrf2"
+            ],
+            "vrf": [
+                "vrf1",
+                "vrf2"
+            ],
+            "acl_name": [
+                "acl1",
+                "acl2"
+            ],
+            "access_list": [
+                "acl1",
+                "acl2"
+            ],
+            "index": [
+                1
+            ],
+            "igmp_dest_addr": [
+                "224.0.0.1",
+                "239.1.1.1"
+            ],
+            "igmp_src_addr": [
+                "224.0.0.1",
+                "239.1.1.1"
+            ]
+        }
+    },
+    "field_couplings": [
+        {
+            "endpoints": [
+                "/interfaces/tunnel/add"
+            ],
+            "when": {
+                "path": "settings.mode",
+                "in": [
+                    "gretap"
+                ]
+            },
+            "ensure": {
+                "settings.dst_address": {
+                    "from_mock": "dst_address"
+                }
+            },
+            "only_if_missing": true
         },
         {
-          "prefix": "tunnel",
-          "teardown_priority": 10,
-          "setup": {
-            "endpoint": "/interfaces/tunnel/add",
-            "method": "POST",
-            "payload": {
-              "ifname": "{{ifname}}",
-              "settings": {
-                "source": "1.1.1.1",
-                "dst_address": "10.0.0.2"
-              }
+            "endpoints": [
+                "/acl/acl_ipv4"
+            ],
+            "when": {
+                "path": "action.add.rule.icmp",
+                "present": true
             },
-            "extract_to_variable": "created_ifname_tunnel",
-            "response_extract": "data.ifname"
-          },
-          "teardown": [
-            {
-            "endpoint": "/interfaces/tunnel/delete",
-            "method": "POST",
-            "payload": {
-              "ifname": "{{ifname}}"
+            "ensure": {
+                "action.add.rule.protocol": {
+                    "value": {
+                        "protocol_name": "icmp"
+                    }
+                }
             },
-            "note": "Cleanup created ifname_tunnel"
-          }
-          ]
+            "remove": [
+                "action.add.rule.tcp_flags",
+                "action.add.rule.destinationports",
+                "action.add.rule.sourceports",
+                "action.add.rule.igmp_src",
+                "action.add.rule.igmp_dest"
+            ],
+            "only_if_missing": false
+        },
+        {
+            "endpoints": [
+                "/acl/acl_ipv4"
+            ],
+            "when": {
+                "path": "action.delete.rule.icmp",
+                "present": true
+            },
+            "ensure": {
+                "action.delete.rule.protocol": {
+                    "value": {
+                        "protocol_name": "icmp"
+                    }
+                }
+            },
+            "remove": [
+                "action.delete.rule.tcp_flags",
+                "action.delete.rule.destinationports",
+                "action.delete.rule.sourceports",
+                "action.delete.rule.igmp_src",
+                "action.delete.rule.igmp_dest"
+            ],
+            "only_if_missing": false
+        },
+        {
+            "endpoints": [
+                "/acl/acl_ipv4"
+            ],
+            "when": {
+                "path": "action.add.rule.igmp_src",
+                "present": true
+            },
+            "ensure": {
+                "action.add.rule.protocol": {
+                    "value": {
+                        "protocol_name": "igmp"
+                    }
+                }
+            },
+            "remove": [
+                "action.add.rule.tcp_flags",
+                "action.add.rule.destinationports",
+                "action.add.rule.sourceports",
+                "action.add.rule.icmp"
+            ],
+            "only_if_missing": false
+        },
+        {
+            "endpoints": [
+                "/acl/acl_ipv4"
+            ],
+            "when": {
+                "path": "action.delete.rule.igmp_src",
+                "present": true
+            },
+            "ensure": {
+                "action.delete.rule.protocol": {
+                    "value": {
+                        "protocol_name": "igmp"
+                    }
+                }
+            },
+            "remove": [
+                "action.delete.rule.tcp_flags",
+                "action.delete.rule.destinationports",
+                "action.delete.rule.sourceports",
+                "action.delete.rule.icmp"
+            ],
+            "only_if_missing": false
+        },
+        {
+            "endpoints": [
+                "/acl/acl_ipv4"
+            ],
+            "when": {
+                "path": "action.add.rule.igmp_dest",
+                "present": true
+            },
+            "ensure": {
+                "action.add.rule.protocol": {
+                    "value": {
+                        "protocol_name": "igmp"
+                    }
+                }
+            },
+            "remove": [
+                "action.add.rule.tcp_flags",
+                "action.add.rule.destinationports",
+                "action.add.rule.sourceports",
+                "action.add.rule.icmp"
+            ],
+            "only_if_missing": false
+        },
+        {
+            "endpoints": [
+                "/acl/acl_ipv4"
+            ],
+            "when": {
+                "path": "action.delete.rule.igmp_dest",
+                "present": true
+            },
+            "ensure": {
+                "action.delete.rule.protocol": {
+                    "value": {
+                        "protocol_name": "igmp"
+                    }
+                }
+            },
+            "remove": [
+                "action.delete.rule.tcp_flags",
+                "action.delete.rule.destinationports",
+                "action.delete.rule.sourceports",
+                "action.delete.rule.icmp"
+            ],
+            "only_if_missing": false
+        },
+        {
+            "endpoints": [
+                "/acl/acl_ipv4"
+            ],
+            "when": {
+                "path": "action.add.rule.sourceports",
+                "present": true
+            },
+            "ensure": {
+                "action.add.rule.protocol": {
+                    "value": {
+                        "protocol_name": "tcp"
+                    }
+                }
+            },
+            "remove": [
+                "action.add.rule.icmp",
+                "action.add.rule.igmp_dest",
+                "action.add.rule.igmp_src"
+            ],
+            "only_if_missing": false
+        },
+        {
+            "endpoints": [
+                "/acl/acl_ipv4"
+            ],
+            "when": {
+                "path": "action.delete.rule.sourceports",
+                "present": true
+            },
+            "ensure": {
+                "action.delete.rule.protocol": {
+                    "value": {
+                        "protocol_name": "tcp"
+                    }
+                }
+            },
+            "remove": [
+                "action.delete.rule.icmp",
+                "action.delete.rule.igmp_dest",
+                "action.delete.rule.igmp_src"
+            ],
+            "only_if_missing": false
+        },
+        {
+            "endpoints": [
+                "/acl/acl_ipv4"
+            ],
+            "when": {
+                "path": "action.add.rule.destinationports",
+                "present": true
+            },
+            "ensure": {
+                "action.add.rule.protocol": {
+                    "value": {
+                        "protocol_name": "tcp"
+                    }
+                }
+            },
+            "remove": [
+                "action.add.rule.icmp",
+                "action.add.rule.igmp_dest",
+                "action.add.rule.igmp_src"
+            ],
+            "only_if_missing": false
+        },
+        {
+            "endpoints": [
+                "/acl/acl_ipv4"
+            ],
+            "when": {
+                "path": "action.delete.rule.destinationports",
+                "present": true
+            },
+            "ensure": {
+                "action.delete.rule.protocol": {
+                    "value": {
+                        "protocol_name": "tcp"
+                    }
+                }
+            },
+            "remove": [
+                "action.delete.rule.icmp",
+                "action.delete.rule.igmp_dest",
+                "action.delete.rule.igmp_src"
+            ],
+            "only_if_missing": false
+        },
+        {
+            "endpoints": [
+                "/acl/acl_ipv4"
+            ],
+            "when": {
+                "path": "action.add.rule.tcp_flags",
+                "present": true
+            },
+            "ensure": {
+                "action.add.rule.protocol": {
+                    "value": {
+                        "protocol_name": "tcp"
+                    }
+                }
+            },
+            "remove": [
+                "action.add.rule.icmp",
+                "action.add.rule.igmp_dest",
+                "action.add.rule.igmp_src"
+            ],
+            "only_if_missing": false
+        },
+        {
+            "endpoints": [
+                "/acl/acl_ipv4"
+            ],
+            "when": {
+                "path": "action.delete.rule.tcp_flags",
+                "present": true
+            },
+            "ensure": {
+                "action.delete.rule.protocol": {
+                    "value": {
+                        "protocol_name": "tcp"
+                    }
+                }
+            },
+            "remove": [
+                "action.delete.rule.icmp",
+                "action.delete.rule.igmp_dest",
+                "action.delete.rule.igmp_src"
+            ],
+            "only_if_missing": false
         }
-      ]
-    }
-  },
-  "interface_lifecycle": {
-    "schema_components": [
-      "IFNAME",
-      "interfaces_ethernet_ifname",
-      "interfaces_eth_vlan_ifname",
-      "interfaces_vlan_ifname"
     ],
-    "rules_key": "ifname",
-    "exclude_fields": ["jail_name"]
-  },
-  "synthetic_bind_fields": {
-    "/datetime/dst": ["time", "timezone", "date"],
-    "/acl/filter/filter_ipv4": ["acl_name"]
-  },
-  "mock_data": {
-    "by_schema": {
-      "FILTER_PORT_LISTING": ["6:17"],
-      "IP_ADDR": ["10.0.0.1", "10.0.0.2", "10.0.0.3"],
-      "IP_ADDR_WITH_BIT_MASK": ["10.0.0.1/24", "10.0.0.2/24", "10.0.0.3/24"],
-      "IPV6_ADDR": ["2001:db8::1", "2001:db8::2"],
-      "IPV6_ADDR_WITH_BIT_MASK": ["2001:db8:1::1/64", "2001:db8:2::1/64"]
-    },
-    "by_field": {
-      "time_range": ["time_range1"],
-      "key_name": ["key1", "key2"],
-      "date": ["23.12.2025"],
-      "ininterface": ["eth1", "eth2"],
-      "outinterface": ["eth1", "eth2"],
-      "time": ["12:00"],
-      "timezone": ["Europe/Moscow"],
-      "description": ["", "autotest-desc"],
-      "zone_name": ["zone1", "zone2"],
-      "master_ip": ["10.0.0.1", "10.0.0.2"],
-      "ip_address": ["10.0.0.1"],
-      "ip_addr": ["10.0.0.10/24", "10.0.0.20/24"],
-      "dst_address": ["10.0.0.2", "10.0.0.3"],
-      "priority": [0],
-      "option_authoritative": ["10.0.0.1"],
-      "option_recursive": ["10.0.0.1"],
-      "jail_name": ["jail1", "jail2"],
-      "vrf_name": ["vrf1", "vrf2"],
-      "vrf": ["vrf1", "vrf2"],
-      "acl_name": ["acl1", "acl2"],
-      "access_list": ["acl1", "acl2"],
-      "index": [1],
-      "igmp_dest_addr": ["224.0.0.1", "239.1.1.1"],
-      "igmp_src_addr": ["224.0.0.1", "239.1.1.1"]
+    "reserved_values": {
+        "by_field": {
+            "ifname": [
+                "vlan0",
+                "vlan1",
+                "vlan603",
+                "vlan4095",
+                "switchport1"
+            ],
+            "vid": [
+                0,
+                1,
+                603,
+                4095
+            ],
+            "vlan": [
+                "0",
+                "1",
+                "603",
+                "4095"
+            ]
+        }
     }
-  },
-  "field_couplings": [
-    {
-      "endpoints": ["/interfaces/tunnel/add"],
-      "when": {
-        "path": "settings.mode",
-        "in": ["gretap"]
-      },
-      "ensure": {
-        "settings.dst_address": { "from_mock": "dst_address" }
-      },
-      "only_if_missing": true
-    },
-    {
-      "endpoints": ["/acl/acl_ipv4"],
-      "when": {
-        "path": "action.add.rule.icmp",
-        "present": true
-      },
-      "ensure": {
-        "action.add.rule.protocol": { "value": { "protocol_name": "icmp" } }
-      },
-      "remove": [
-        "action.add.rule.tcp_flags",
-        "action.add.rule.destinationports",
-        "action.add.rule.sourceports",
-        "action.add.rule.igmp_src",
-        "action.add.rule.igmp_dest"
-      ],
-      "only_if_missing": false
-    },
-    {
-      "endpoints": ["/acl/acl_ipv4"],
-      "when": {
-        "path": "action.delete.rule.icmp",
-        "present": true
-      },
-      "ensure": {
-        "action.delete.rule.protocol": { "value": { "protocol_name": "icmp" } }
-      },
-      "remove": [
-        "action.delete.rule.tcp_flags",
-        "action.delete.rule.destinationports",
-        "action.delete.rule.sourceports",
-        "action.delete.rule.igmp_src",
-        "action.delete.rule.igmp_dest"
-      ],
-      "only_if_missing": false
-    },
-    {
-      "endpoints": ["/acl/acl_ipv4"],
-      "when": { "path": "action.add.rule.igmp_src", "present": true },
-      "ensure": {
-        "action.add.rule.protocol": { "value": { "protocol_name": "igmp" } }
-      },
-      "remove": [
-        "action.add.rule.tcp_flags",
-        "action.add.rule.destinationports",
-        "action.add.rule.sourceports",
-        "action.add.rule.icmp"
-      ],
-      "only_if_missing": false
-    },
-    {
-      "endpoints": ["/acl/acl_ipv4"],
-      "when": { "path": "action.delete.rule.igmp_src", "present": true },
-      "ensure": {
-        "action.delete.rule.protocol": { "value": { "protocol_name": "igmp" } }
-      },
-      "remove": [
-        "action.delete.rule.tcp_flags",
-        "action.delete.rule.destinationports",
-        "action.delete.rule.sourceports",
-        "action.delete.rule.icmp"
-      ],
-      "only_if_missing": false
-    },
-    {
-      "endpoints": ["/acl/acl_ipv4"],
-      "when": { "path": "action.add.rule.igmp_dest", "present": true },
-      "ensure": {
-        "action.add.rule.protocol": { "value": { "protocol_name": "igmp" } }
-      },
-      "remove": [
-        "action.add.rule.tcp_flags",
-        "action.add.rule.destinationports",
-        "action.add.rule.sourceports",
-        "action.add.rule.icmp"
-      ],
-      "only_if_missing": false
-    },
-    {
-      "endpoints": ["/acl/acl_ipv4"],
-      "when": { "path": "action.delete.rule.igmp_dest", "present": true },
-      "ensure": {
-        "action.delete.rule.protocol": { "value": { "protocol_name": "igmp" } }
-      },
-      "remove": [
-        "action.delete.rule.tcp_flags",
-        "action.delete.rule.destinationports",
-        "action.delete.rule.sourceports",
-        "action.delete.rule.icmp"
-      ],
-      "only_if_missing": false
-    },
-    {
-      "endpoints": ["/acl/acl_ipv4"],
-      "when": {"path": "action.add.rule.sourceports", "present": true},
-      "ensure": {
-        "action.add.rule.protocol": { "value": { "protocol_name": "tcp" } }
-      },
-      "remove": [
-        "action.add.rule.icmp",
-        "action.add.rule.igmp_dest",
-        "action.add.rule.igmp_src"
-      ],
-      "only_if_missing": false
-    },
-    {
-      "endpoints": ["/acl/acl_ipv4"],
-      "when": {"path": "action.delete.rule.sourceports", "present": true},
-      "ensure": {
-        "action.delete.rule.protocol": { "value": { "protocol_name": "tcp" } }
-      },
-      "remove": [
-        "action.delete.rule.icmp",
-        "action.delete.rule.igmp_dest",
-        "action.delete.rule.igmp_src"
-      ],
-      "only_if_missing": false
-    },
-    {
-      "endpoints": ["/acl/acl_ipv4"],
-      "when": {"path": "action.add.rule.destinationports", "present": true},
-      "ensure": {
-        "action.add.rule.protocol": { "value": { "protocol_name": "tcp" } }
-      },
-      "remove": [
-        "action.add.rule.icmp",
-        "action.add.rule.igmp_dest",
-        "action.add.rule.igmp_src"
-      ],
-      "only_if_missing": false
-    },
-    {
-      "endpoints": ["/acl/acl_ipv4"],
-      "when": {"path": "action.delete.rule.destinationports", "present": true},
-      "ensure": {
-        "action.delete.rule.protocol": { "value": { "protocol_name": "tcp" } }
-      },
-      "remove": [
-        "action.delete.rule.icmp",
-        "action.delete.rule.igmp_dest",
-        "action.delete.rule.igmp_src"
-      ],
-      "only_if_missing": false
-    },
-    {
-      "endpoints": ["/acl/acl_ipv4"],
-      "when": {"path": "action.add.rule.tcp_flags", "present": true},
-      "ensure": {
-        "action.add.rule.protocol": { "value": { "protocol_name": "tcp" } }
-      },
-      "remove": [
-        "action.add.rule.icmp",
-        "action.add.rule.igmp_dest",
-        "action.add.rule.igmp_src"
-      ],
-      "only_if_missing": false
-    },
-    {
-      "endpoints": ["/acl/acl_ipv4"],
-      "when": {"path": "action.delete.rule.tcp_flags", "present": true},
-      "ensure": {
-        "action.delete.rule.protocol": { "value": { "protocol_name": "tcp" } }
-      },
-      "remove": [
-        "action.delete.rule.icmp",
-        "action.delete.rule.igmp_dest",
-        "action.delete.rule.igmp_src"
-      ],
-      "only_if_missing": false
-    }
-  ],
-  "reserved_values": {
-    "by_field": {
-      "ifname": [
-        "vlan0",
-        "vlan1",
-        "vlan603",
-        "vlan4095",
-        "switchport1"
-      ],
-      "vid": [0, 1, 603, 4095],
-      "vlan": ["0", "1", "603", "4095"]
-    }
-  }
 }

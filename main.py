@@ -1948,6 +1948,47 @@ def _inject_synthetic_field_dependencies(
             f"на {endpoint_key}",
         )
 
+def _inject_missing_bind_fields(
+    deps: dict,
+    variables: dict,
+    target_endpoint: str,
+    endpoint_rules: dict,
+    field_mappings: dict,
+    mock_by_field: dict[str, list],
+) -> None:
+    """
+    Если bind_fields из endpoint_rules отсутствуют в main_payload,
+    но для них есть lifecycle в field_mappings → добавляем их в deps
+    и берём значение из mock_data. Работает по конфигу, без хардкода.
+    """
+    rules = _get_endpoint_rules(target_endpoint, endpoint_rules) or {}
+    bind_fields = rules.get("bind_fields", [])
+    if not bind_fields or not mock_by_field:
+        return
+
+    present_fields = {info["field"] for info in deps.values()}
+    for field in bind_fields:
+        if field in present_fields or field in variables:
+            continue
+        
+        fm_config = field_mappings.get(field)
+        # Инжектим только если для поля действительно есть шаги lifecycle
+        if not fm_config or not (fm_config.get("setup") or fm_config.get("teardown")):
+            continue
+            
+        values = mock_by_field.get(field)
+        if not values:
+            continue
+            
+        value = values[0]
+        variables[field] = value
+        deps[f"_auto_bind.{field}"] = {
+            "field": field,
+            "value": value,
+            "config": fm_config,
+        }
+        logger.debug(f"Auto bind dependency: {field}={value!r} для {target_endpoint}")
+
 
 def _lifecycle_endpoint_from_config(config: dict, phase: str) -> str | None:
     """Endpoint из setup/teardown или legacy create/delete."""
@@ -2562,7 +2603,7 @@ def _should_skip_endpoint_rules_lifecycle_step(
     if step_endpoint.rstrip("/") != target_endpoint.rstrip("/"):
         return False
     if phase == "setup":
-        return main_action != "delete"
+        return main_action in ("add", None)
     if phase == "teardown":
         # Раньше пропускали teardown при main delete; теперь всегда оставляем
         # для гарантированной очистки (как fail2ban / ACL).
@@ -3977,7 +4018,7 @@ def _append_lifecycle_setup(scenario, target_endpoint, field_name, field_value,
             continue
 
         endpoint = step_def["endpoint"]
-        is_self = endpoint.rstrip("/") == target_endpoint.rstrip("/")
+        is_self = endpoint.rstrip("/") == target_endpoint.rstrip("/") and main_action != "modify"
         if is_self and main_action != "delete" and not force_setup:
             logger.debug(
                 f"Self-skip setup: тестируем {target_endpoint}, "
@@ -5067,6 +5108,15 @@ def build_test_scenarios(
             dep_map=dep_map,
             mock_by_field=mock_by_field,
             synthetic_fields=synthetic_bind_fields,
+        )
+
+        _inject_missing_bind_fields(
+            deps,
+            variables,
+            target_endpoint=target_endpoint,
+            endpoint_rules=endpoint_rules,
+            field_mappings=dep_map,
+            mock_by_field=mock_by_field,
         )
 
         # =====================================================================

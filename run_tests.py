@@ -315,11 +315,12 @@ def _log_step(verbose: bool, step: StepResult) -> None:
         attempt_suffix = f" (attempt {step.attempt}/{step.max_attempts})"
 
     if verbose:
-        logger.info(_SEPARATOR)
-        logger.info(f"{phase_title}{attempt_suffix}  {step.method} {step.endpoint}")
+        phase_header = f"[ {phase_title}{attempt_suffix} ] {step.method} {step.endpoint}"
+        header_line = f"--- {phase_header} ".ljust(80, "-")
+        logger.info("")
+        logger.info(header_line)
         if step.note:
             logger.info(f"Note: {step.note}")
-        logger.info(_SUB_SEPARATOR)
         logger.info(f"URL: {step.url}")
         logger.info("Request body:")
         logger.info(_format_json(step.request_payload))
@@ -341,25 +342,15 @@ def _log_step(verbose: bool, step: StepResult) -> None:
         if step.error:
             logger.info(f"Error: {step.error}")
         logger.info(_SUB_SEPARATOR)
-        logger.info(f"Result: {status_label}")
+        logger.info(f"Step Result: {status_label}")
         return
 
-    request_preview = json.dumps(step.request_payload, ensure_ascii=False)
-    if len(request_preview) > 120:
-        request_preview = request_preview[:117] + "..."
-    response_preview = _format_json(step.response_body)
-    if len(response_preview) > 120:
-        response_preview = response_preview[:117] + "..."
-
     logger.info(
-        f"{phase_title:8} {step.method:4} {step.endpoint}{attempt_suffix} "
+        f"  {phase_title:8} {step.method:4} {step.endpoint}{attempt_suffix} "
         f"→ {step.status_code} ({step.elapsed_ms:.0f} ms) [{status_label}]"
     )
-    logger.info(f"  request : {request_preview}")
-    if step.status_code is not None:
-        logger.info(f"  response: {response_preview}")
     if step.error:
-        logger.info(f"  error   : {step.error}")
+        logger.info(f"    error   : {step.error}")
 
 
 def _log_scenario_header(
@@ -377,27 +368,30 @@ def _log_scenario_header(
         logger.info("")
         logger.info(_SEPARATOR)
         logger.info(
-            f"TEST {index}/{total}  #{test_id}  {endpoint}"
+            f">>> START TEST [{index}/{total}]  #{test_id}  {endpoint}"
         )
-        logger.info(f"Description : {description}")
-        logger.info(f"Coverage    : {coverage}")
+        logger.info(f"    Description : {description}")
+        logger.info(f"    Coverage    : {coverage}")
         logger.info(_SEPARATOR)
         return
 
     logger.info("")
     logger.info(
-        f"TEST {index}/{total}  #{test_id}  {endpoint}  |  {description}"
+        f">>> TEST [{index}/{total}]  #{test_id}  {endpoint}  |  {description}"
     )
-    logger.info(f"  coverage: {coverage}")
 
 
 def _log_scenario_footer(verbose: bool, result: ScenarioResult) -> None:
     label = "PASS" if result.passed else "FAIL"
     if verbose:
+        logger.info("")
         logger.info(_SEPARATOR)
-        logger.info(f"Scenario #{result.test_id}: {label}")
+        logger.info(f"<<< END TEST #{result.test_id}  |  RESULT: {label}")
+        logger.info(_SEPARATOR)
+        logger.info("")
         return
     logger.info(f"  → scenario #{result.test_id}: {label}")
+    logger.info("_" * 80)
 
 
 def _execute_step(
